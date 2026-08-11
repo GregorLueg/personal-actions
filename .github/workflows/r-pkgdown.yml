@@ -4,7 +4,9 @@ on:
   workflow_call:
     inputs:
       rust:
-        description: Package carries a Rust crate under src/rust.
+        description: >-
+          Build needs a Rust toolchain and sccache. Also true for pure-R
+          packages that install a rextendr dependency from source.
         type: boolean
         default: true
       rust-toolchain:
