@@ -13,9 +13,10 @@ by the copier template in
 | workflow | for |
 |---|---|
 | `r-cmd-check.yml` | R CMD check, with or without a Rust crate |
+| `r-pkgdown.yml` | Build the pkgdown site, deploy on non-PR events |
+| `r-auto-tag.yml` | Tag and release on a version bump, gated on a green check |
 
-More to follow: `r-pkgdown.yml`, `r-auto-tag.yml`, `rust-test.yml`,
-`rust-release.yml`.
+More to follow: `rust-test.yml`, `rust-release.yml`.
 
 ### `r-cmd-check.yml`
 
@@ -55,6 +56,68 @@ links against the gnu ABI rather than msvc.
 If the repo has a `.copier-answers.yml`, a Linux-only step warns on template
 drift. It never fails the build: a repo mid-release should not be blocked
 because the template moved.
+
+### `r-pkgdown.yml`
+
+```yaml
+name: pkgdown
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  pkgdown:
+    uses: GregorLueg/personal-actions/.github/workflows/r-pkgdown.yml@v1
+    with:
+      rust: true
+      gpu: false
+    secrets: inherit
+```
+
+Inputs are `rust`, `gpu` and `extra-sysdeps`, same meaning as above. The deploy
+step is guarded by `github.event_name != 'pull_request'`, so a PR builds the
+site to prove it builds and publishes nothing.
+
+### `r-auto-tag.yml`
+
+This one is triggered by a **completed check run, not by a push**, so a broken
+package can never be tagged. Wire it up like this:
+
+```yaml
+name: Auto tag
+on:
+  workflow_run:
+    workflows: ["R-CMD-check"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  tag:
+    uses: GregorLueg/personal-actions/.github/workflows/r-auto-tag.yml@v1
+    secrets: inherit
+```
+
+`workflows:` must match the `name:` of that repo's check workflow. The job is
+skipped unless the run succeeded on the default branch, so pointing this at a
+`push` trigger silently does nothing. It reads `Version` from `DESCRIPTION`,
+does nothing if `v$Version` already exists, and otherwise tags and cuts a
+release with generated notes.
+
+There is no `paths: [DESCRIPTION]` filter and none is needed. The job runs after
+every green check on the default branch, finds the tag present and exits in
+about two seconds.
+
+Declare `permissions: contents: write` in the caller. A called workflow's
+permissions are capped by the caller's token, so leaving it out can make the tag
+push fail on repos whose default token is read-only.
 
 ## Versioning
 

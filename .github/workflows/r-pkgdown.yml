@@ -1,0 +1,100 @@
+name: pkgdown
+
+on:
+  workflow_call:
+    inputs:
+      rust:
+        description: Package carries a Rust crate under src/rust.
+        type: boolean
+        default: true
+      gpu:
+        description: Install Vulkan and set WGPU_BACKEND.
+        type: boolean
+        default: false
+      extra-sysdeps:
+        description: Extra apt packages, space separated.
+        type: string
+        default: ''
+
+jobs:
+  pkgdown:
+    name: Build site
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pkgdown-${{ github.run_id }}
+    permissions:
+      contents: write
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+          extra-repositories: 'https://cloud.r-project.org'
+
+      - name: Setup Rust
+        if: inputs.rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Setup sccache
+        if: inputs.rust
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cargo env
+        if: inputs.rust
+        run: |
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "CARGO_NET_RETRY=10"
+            echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse"
+            echo "CARGO_TERM_COLOR=always"
+            echo "CARGO_PROFILE_RELEASE_LTO=false"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+          } >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: |
+          pkgs="libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev"
+          if [ '${{ inputs.gpu }}' = 'true' ]; then
+            pkgs="$pkgs libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri"
+          fi
+          pkgs="$pkgs ${{ inputs.extra-sysdeps }}"
+          sudo apt-get update
+          # shellcheck disable=SC2086  # word splitting is the point here
+          sudo apt-get install -y $pkgs
+
+      - name: Set wgpu backend
+        if: inputs.gpu
+        run: echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::pkgdown, local::.
+          needs: website
+
+      - name: Build site
+        run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE, quiet = FALSE)
+        shell: Rscript {0}
+
+      - name: sccache stats
+        if: always() && inputs.rust
+        run: sccache --show-stats
+
+      # The guard is the point. Without it any PR into main publishes unmerged
+      # docs to gh-pages, which is what bixverse has been doing.
+      - name: Deploy to GitHub pages
+        if: github.event_name != 'pull_request'
+        uses: JamesIves/github-pages-deploy-action@v4.7.3
+        with:
+          clean: false
+          branch: gh-pages
+          folder: docs
