@@ -1,0 +1,13 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "description": "personal-actions callers pin a moving major tag on purpose",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["GregorLueg/personal-actions"],
+      "enabled": false
+    }
+  ]
+}
