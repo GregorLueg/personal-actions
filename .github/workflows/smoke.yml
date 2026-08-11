@@ -1,0 +1,23 @@
+name: Smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# actionlint catches YAML errors, bad expressions, unknown contexts and broken
+# `needs` references, which is what actually breaks a reusable workflow. It
+# cannot run the workflows: `actions/checkout` inside a workflow_call checks out
+# the *caller*, so there is no way to point one of these at a fixture package
+# without a separate fixture repo. The real integration test is the first
+# consumer going green after a tag move.
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: raven-actions/actionlint@v2
+        with:
+          fail-on-error: true

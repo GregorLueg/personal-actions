@@ -1,0 +1,161 @@
+name: R-CMD-check
+
+on:
+  workflow_call:
+    inputs:
+      rust:
+        description: Package carries a Rust crate under src/rust.
+        type: boolean
+        default: true
+      gpu:
+        description: Install Vulkan on Linux and set WGPU_BACKEND.
+        type: boolean
+        default: false
+      windows:
+        description: Include windows-latest in the matrix.
+        type: boolean
+        default: true
+      linux-runner:
+        description: Linux runner label. ubuntu-22.04 where the toolchain needs it.
+        type: string
+        default: ubuntu-latest
+      extra-sysdeps:
+        description: Extra apt packages, space separated.
+        type: string
+        default: ''
+      rebuild-from-source:
+        description: >-
+          R packages to reinstall from source on macOS after pak has run,
+          space separated. Works around binaries built against the wrong
+          toolchain.
+        type: string
+        default: ''
+
+jobs:
+  matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.build.outputs.config }}
+    steps:
+      - id: build
+        run: |
+          cfg=$(jq -nc --arg linux '${{ inputs.linux-runner }}' \
+            '[{os: "macOS-latest", r: "release"}, {os: $linux, r: "release"}]')
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cfg=$(jq -c '. + [{os: "windows-latest", r: "release"}]' <<< "$cfg")
+          fi
+          echo "config=$cfg" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: matrix
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+    runs-on: ${{ matrix.config.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(needs.matrix.outputs.config) }}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          use-public-rspm: true
+          extra-repositories: 'https://cloud.r-project.org'
+
+      # extendr links against the gnu ABI on Windows, not msvc.
+      - name: Setup Rust
+        if: inputs.rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ runner.os == 'Windows' && 'stable-x86_64-pc-windows-gnu' || 'stable' }}
+
+      - name: Setup sccache
+        if: inputs.rust
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cargo env
+        if: inputs.rust
+        shell: bash
+        run: |
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "CARGO_NET_RETRY=10"
+            echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse"
+            echo "CARGO_TERM_COLOR=always"
+            echo "CARGO_PROFILE_RELEASE_LTO=false"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+          } >> "$GITHUB_ENV"
+
+      # fftw is not reliably present on Windows, so packages that use it drop
+      # the feature there. This only matters if something still pulls fftw-sys.
+      - name: Set FFTW environment (Windows)
+        if: inputs.rust && runner.os == 'Windows'
+        shell: bash
+        run: echo "FFTW_SYS_USE_SYSTEM_FFTW=1" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pkgs="libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev"
+          if [ '${{ inputs.gpu }}' = 'true' ]; then
+            pkgs="$pkgs libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri"
+          fi
+          pkgs="$pkgs ${{ inputs.extra-sysdeps }}"
+          sudo apt-get update
+          # shellcheck disable=SC2086  # word splitting is the point here
+          sudo apt-get install -y $pkgs
+
+      - name: Set wgpu backend (Linux)
+        if: inputs.gpu && runner.os == 'Linux'
+        run: echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: |
+            any::rcmdcheck
+            any::rmarkdown
+            any::knitr
+            any::rextendr
+          needs: check
+
+      - name: Rebuild from source (macOS)
+        if: inputs.rebuild-from-source != '' && runner.os == 'macOS'
+        run: |
+          pkgs <- strsplit(trimws("${{ inputs.rebuild-from-source }}"), "\\s+")[[1]]
+          install.packages(pkgs, type = "source", repos = "https://cloud.r-project.org")
+        shell: Rscript {0}
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          build_args: 'c("--no-manual","--no-build-vignettes")'
+          args: 'c("--no-manual", "--no-vignettes")'
+          error-on: '"error"'
+
+      # Linux only: once per run is enough, and pipx is not guaranteed on the
+      # Windows image. Never fails the build, a repo mid-release must not be
+      # blocked because the template moved.
+      - name: Check template drift
+        if: always() && runner.os == 'Linux' && hashFiles('.copier-answers.yml') != ''
+        shell: bash
+        continue-on-error: true
+        run: |
+          pipx install copier
+          copier update --pretend --defaults --quiet \
+            || echo "::warning::template drift, run copier update"
+
+      - name: sccache stats
+        if: always() && inputs.rust
+        run: sccache --show-stats
