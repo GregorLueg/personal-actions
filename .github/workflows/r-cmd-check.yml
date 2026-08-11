@@ -7,6 +7,12 @@ on:
         description: Package carries a Rust crate under src/rust.
         type: boolean
         default: true
+      rust-toolchain:
+        description: >-
+          Rust toolchain, e.g. stable or 1.91.0. The gnu target suffix is
+          appended automatically on Windows.
+        type: string
+        default: stable
       gpu:
         description: Install Vulkan on Linux and set WGPU_BACKEND.
         type: boolean
@@ -78,7 +84,7 @@ jobs:
         if: inputs.rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ runner.os == 'Windows' && 'stable-x86_64-pc-windows-gnu' || 'stable' }}
+          toolchain: ${{ runner.os == 'Windows' && format('{0}-x86_64-pc-windows-gnu', inputs.rust-toolchain) || inputs.rust-toolchain }}
 
       - name: Setup sccache
         if: inputs.rust

@@ -44,6 +44,7 @@ jobs:
 | input | type | default | what it does |
 |---|---|---|---|
 | `rust` | boolean | `true` | Sets up the toolchain and sccache. Off for pure-R packages. |
+| `rust-toolchain` | string | `stable` | Pin a version, e.g. `1.91.0`. The gnu suffix is appended on Windows. |
 | `gpu` | boolean | `false` | Installs Vulkan on Linux, sets `WGPU_BACKEND=vulkan`. |
 | `windows` | boolean | `true` | Adds `windows-latest` to the matrix. |
 | `linux-runner` | string | `ubuntu-latest` | Pin to `ubuntu-22.04` where the toolchain needs it. |

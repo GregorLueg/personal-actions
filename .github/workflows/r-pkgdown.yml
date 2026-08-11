@@ -7,6 +7,10 @@ on:
         description: Package carries a Rust crate under src/rust.
         type: boolean
         default: true
+      rust-toolchain:
+        description: Rust toolchain, e.g. stable or 1.91.0.
+        type: string
+        default: stable
       gpu:
         description: Install Vulkan and set WGPU_BACKEND.
         type: boolean
@@ -41,7 +45,7 @@ jobs:
         if: inputs.rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: ${{ inputs.rust-toolchain }}
 
       - name: Setup sccache
         if: inputs.rust
