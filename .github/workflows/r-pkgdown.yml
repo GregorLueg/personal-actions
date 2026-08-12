@@ -59,16 +59,21 @@ jobs:
         with:
           toolchain: ${{ inputs.rust-toolchain }}
 
+      # Optional, see the note in r-cmd-check.yml.
       - name: Setup sccache
+        id: sccache
         if: inputs.rust
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cargo env
         if: inputs.rust
         run: |
+          if command -v sccache >/dev/null; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          fi
           {
-            echo "SCCACHE_GHA_ENABLED=true"
-            echo "RUSTC_WRAPPER=sccache"
             echo "CARGO_INCREMENTAL=0"
             echo "CARGO_NET_RETRY=10"
             echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse"
@@ -102,7 +107,7 @@ jobs:
         shell: Rscript {0}
 
       - name: sccache stats
-        if: always() && inputs.rust
+        if: always() && inputs.rust && steps.sccache.outcome == 'success'
         run: sccache --show-stats
 
       # The guard is the point. Without it any PR into main publishes unmerged

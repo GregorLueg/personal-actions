@@ -106,17 +106,25 @@ jobs:
         with:
           toolchain: ${{ runner.os == 'Windows' && format('{0}-x86_64-pc-windows-gnu', inputs.rust-toolchain) || inputs.rust-toolchain }}
 
+      # Optional. The action resolves the sccache release through the GitHub
+      # API and that call fails intermittently on the hosted macOS runners
+      # (TLS interception Node will not accept), so a missing compile cache
+      # must never fail the job.
       - name: Setup sccache
+        id: sccache
         if: inputs.rust
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cargo env
         if: inputs.rust
         shell: bash
         run: |
+          if command -v sccache >/dev/null; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          fi
           {
-            echo "SCCACHE_GHA_ENABLED=true"
-            echo "RUSTC_WRAPPER=sccache"
             echo "CARGO_INCREMENTAL=0"
             echo "CARGO_NET_RETRY=10"
             echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse"
@@ -171,5 +179,5 @@ jobs:
           error-on: '"error"'
 
       - name: sccache stats
-        if: always() && inputs.rust
+        if: always() && inputs.rust && steps.sccache.outcome == 'success'
         run: sccache --show-stats
