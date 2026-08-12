@@ -75,6 +75,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Must run before R CMD check. The check leaves a tarball and a check/
+      # directory behind, and copier refuses to operate on a dirty tree, which
+      # turns every run into a false drift warning.
+      #
+      # Linux only: once per run is enough, and pipx is not guaranteed on the
+      # Windows image. Never fails the build, a repo mid-release must not be
+      # blocked because the template moved.
+      - name: Check template drift
+        if: runner.os == 'Linux' && hashFiles('.copier-answers.yml') != ''
+        shell: bash
+        continue-on-error: true
+        run: |
+          pipx install copier
+          copier update --pretend --defaults --quiet \
+            || echo "::warning::template drift, run copier update"
+
       - uses: r-lib/actions/setup-pandoc@v2
 
       - uses: r-lib/actions/setup-r@v2
@@ -153,18 +169,6 @@ jobs:
           build_args: 'c("--no-manual","--no-build-vignettes")'
           args: 'c("--no-manual", "--no-vignettes")'
           error-on: '"error"'
-
-      # Linux only: once per run is enough, and pipx is not guaranteed on the
-      # Windows image. Never fails the build, a repo mid-release must not be
-      # blocked because the template moved.
-      - name: Check template drift
-        if: always() && runner.os == 'Linux' && hashFiles('.copier-answers.yml') != ''
-        shell: bash
-        continue-on-error: true
-        run: |
-          pipx install copier
-          copier update --pretend --defaults --quiet \
-            || echo "::warning::template drift, run copier update"
 
       - name: sccache stats
         if: always() && inputs.rust
