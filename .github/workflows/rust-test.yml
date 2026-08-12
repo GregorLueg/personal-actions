@@ -1,0 +1,208 @@
+name: Rust test
+
+on:
+  workflow_call:
+    inputs:
+      cpu-args:
+        description: >-
+          Args appended to `cargo test` for the CPU job, e.g.
+          "--release --no-default-features".
+        type: string
+        default: ''
+      cpu-args-extra:
+        description: >-
+          Optional second `cargo test` run for the CPU job. bixverse-rs tests
+          the default-feature-free build and the feature build separately.
+        type: string
+        default: ''
+      windows-cpu-args:
+        description: >-
+          Overrides cpu-args on Windows. ann-search-rs drops the gpu feature
+          there.
+        type: string
+        default: ''
+      gpu-args:
+        description: >-
+          Args for the GPU job. Leave empty to skip the GPU job entirely,
+          which is what node2vec-rs wants.
+        type: string
+        default: ''
+      windows:
+        description: Include windows-latest in the CPU matrix.
+        type: boolean
+        default: true
+      needs-r:
+        description: >-
+          Crate links against R via extendr. Installs R and the shared libR,
+          and switches Windows to the gnu ABI.
+        type: boolean
+        default: false
+      gpu-malloc-check:
+        description: >-
+          Set MALLOC_CHECK_=3 on the Linux GPU job. Under lavapipe a kernel
+          writing past a shared-memory allocation is a real heap overflow, and
+          this aborts at the next free instead of letting it pass silently.
+          Off by default: turning it on can legitimately turn a green lane red.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 30
+
+# Debug info is the bulk of target/ and the cache restore is the dominant cost
+# on Windows. Set here rather than in Cargo.toml so local builds keep their
+# backtraces.
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      cpu: ${{ steps.build.outputs.cpu }}
+    steps:
+      - id: build
+        run: |
+          cfg='["ubuntu-latest","macos-latest"]'
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cfg=$(jq -c '. + ["windows-latest"]' <<< "$cfg")
+          fi
+          echo "cpu=$cfg" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: matrix
+    name: CPU on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.cpu) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Defender scans every file cargo and the cache extractor touch, which is
+      # a large multiplier on an IO-bound job. Must come before the cache step.
+      - name: Exclude build dirs from Defender (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionProcess "cargo.exe","rustc.exe","link.exe","ld.exe"
+
+      - name: Install R
+        id: setup-r
+        if: inputs.needs-r
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install R shared library (Linux)
+        if: inputs.needs-r && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y r-base-dev
+          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      # R on Windows is mingw-built, so extendr needs the GNU ABI. Install it
+      # directly instead of pulling MSVC first and switching afterwards.
+      - uses: dtolnay/rust-toolchain@stable
+        if: '!(inputs.needs-r && runner.os == ''Windows'')'
+      - uses: dtolnay/rust-toolchain@master
+        if: inputs.needs-r && runner.os == 'Windows'
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+          cache-on-failure: true
+
+      - name: Set R_HOME (Windows)
+        if: inputs.needs-r && runner.os == 'Windows'
+        shell: pwsh
+        run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
+
+      - name: Run tests
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
+          DYLD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
+        run: |
+          args='${{ inputs.cpu-args }}'
+          if [ "$RUNNER_OS" = 'Windows' ] && [ -n '${{ inputs.windows-cpu-args }}' ]; then
+            args='${{ inputs.windows-cpu-args }}'
+          fi
+          # shellcheck disable=SC2086  # word splitting is the point here
+          cargo test $args
+          extra='${{ inputs.cpu-args-extra }}'
+          if [ -n "$extra" ]; then
+            # shellcheck disable=SC2086
+            cargo test $extra
+          fi
+
+  test-gpu:
+    if: inputs.gpu-args != ''
+    name: GPU on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install R
+        id: setup-r
+        if: inputs.needs-r
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install R shared library (Linux)
+        if: inputs.needs-r && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y r-base-dev
+          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-gpu
+          cache-on-failure: true
+
+      # The Linux runner has no real GPU and falls back to lavapipe software
+      # Vulkan, so this is a smoke lane: it covers the shared-memory reduction
+      # arm and SPIR-V codegen, neither of which Apple exercises.
+      - name: Install Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+
+      # MALLOC_CHECK_ is glibc only and a no-op on macOS. It reports where the
+      # damage was noticed, not where it was done, which is enough to turn the
+      # lane red.
+      - name: Enable glibc heap checks (Linux)
+        if: inputs.gpu-malloc-check && runner.os == 'Linux'
+        run: echo "MALLOC_CHECK_=3" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
+          DYLD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
+        # shellcheck disable=SC2086
+        run: cargo test ${{ inputs.gpu-args }}
