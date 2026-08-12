@@ -15,8 +15,12 @@ by the copier template in
 | `r-cmd-check.yml` | R CMD check, with or without a Rust crate |
 | `r-pkgdown.yml` | Build the pkgdown site, deploy on non-PR events |
 | `r-auto-tag.yml` | Tag and release on a version bump, gated on a green check |
+| `rust-test.yml` | Crate tests, CPU and GPU lanes |
+| `rust-release.yml` | Tag, release and `cargo publish`, gated on a green test |
 
-More to follow: `rust-test.yml`, `rust-release.yml`.
+Consumers: five R packages and six Rust crates. `node2vec-rs` uses
+`rust-test.yml` but keeps a bespoke release, because it cross-compiles binaries
+for three targets and attaches them as release assets.
 
 ### `r-cmd-check.yml`
 
@@ -120,14 +124,101 @@ Declare `permissions: contents: write` in the caller. A called workflow's
 permissions are capped by the caller's token, so leaving it out can make the tag
 push fail on repos whose default token is read-only.
 
+### `rust-test.yml`
+
+```yaml
+name: Test the package
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    uses: GregorLueg/personal-actions/.github/workflows/rust-test.yml@v1
+    with:
+      cpu-args: '--release --no-default-features'
+      gpu-args: '--release --features gpu,parametric,fft_tsne'
+    secrets: inherit
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `cpu-args` | string | `''` | Appended to `cargo test` on the CPU lane. |
+| `cpu-args-extra` | string | `''` | A second `cargo test` run. Only `bixverse-rs` needs one. |
+| `windows-cpu-args` | string | `''` | Overrides `cpu-args` on Windows. `ann-search-rs` drops `gpu` there. |
+| `gpu-args` | string | `''` | GPU lane args. **Empty skips the GPU job entirely**, which is what `node2vec-rs` wants. |
+| `windows` | boolean | `true` | Include `windows-latest` in the CPU matrix. |
+| `needs-r` | boolean | `false` | Installs R and the shared libR, and switches Windows to the gnu ABI. `bixverse-rs` links against R via extendr. |
+| `gpu-malloc-check` | boolean | `false` | `MALLOC_CHECK_=3` on the Linux GPU lane. |
+| `timeout-minutes` | number | `30` | |
+
+Caching is `Swatinem/rust-cache@v2` with `cache-on-failure`, keyed per OS and
+separately for the GPU lane. On Windows the workspace and `~/.cargo` are excluded
+from Defender first: it scans every file cargo and the cache extractor touch,
+which is a large multiplier on an IO-bound job.
+
+The Linux GPU lane has no real GPU and falls back to lavapipe software Vulkan.
+Treat it as a smoke lane that covers the shared-memory reduction arm and SPIR-V
+codegen, neither of which Apple exercises. `gpu-malloc-check` is off by default
+because turning it on can legitimately turn a currently-green lane red: under
+lavapipe a kernel writing past a shared-memory allocation is a real heap
+overflow, and glibc will abort at the next free.
+
+### `rust-release.yml`
+
+Same shape as `r-auto-tag.yml`: triggered by a completed test run, not a push.
+
+```yaml
+name: Release
+on:
+  workflow_run:
+    workflows: ["Test the package"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: GregorLueg/personal-actions/.github/workflows/rust-release.yml@v1
+    with:
+      publish-args: '--features parametric,fft_tsne,gpu'
+    secrets: inherit
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `publish-args` | string | `''` | Appended to `cargo publish`, e.g. `--features binary,gpu` or `--no-verify`. |
+| `needs-r` | boolean | `false` | The publish verification build links against R. |
+
+It reads `version` from `Cargo.toml`, does nothing if `v$version` already exists,
+and otherwise tags, releases with generated notes, and publishes.
+
+`secrets: inherit` is not optional here: the publish step needs
+`CARGO_REGISTRY_TOKEN`.
+
+**`cargo publish` is irreversible.** crates.io will not accept a re-upload of a
+version, so the tag-exists check is the only thing standing between a merge and
+a permanent mistake. It runs before anything is pushed anywhere.
+
 ## Versioning
 
-Callers pin `@v1`. Releases are tagged `vX.Y.Z` and the major tag moves to
-point at the newest compatible release.
+Callers pin `@v1`. Releases are tagged `vX.Y.Z` and the major tag moves to point
+at the newest compatible release.
 
-Move `v1` only after one consumer has gone green on the new sha. A bad `v1`
-takes down every repo at once, so after the first tag `main` is protected and
-changes go through a PR.
+`main` moving is inert: nothing consumes it. **Moving `v1` is the deployment.**
+Do that only after one consumer has gone green on the new sha, because a bad
+`v1` reaches eleven repos at once. Rolling back is moving the tag again.
+
+Note the contrast with
+[personal-templates](https://github.com/GregorLueg/personal-templates), which
+takes plain version tags and no moving major. Copier resolves the newest tag by
+itself, so a moving tag there would confuse it. Same author, opposite
+discipline, which is why they are two repos.
 
 ## Testing
 
@@ -135,3 +226,8 @@ changes go through a PR.
 end to end: `actions/checkout` inside a `workflow_call` checks out the calling
 repo, so there is no way to point one at a fixture package without a separate
 fixture repo. The real integration test is the first consumer going green.
+
+Worth knowing what that leaves untested. Every path here has now run in anger
+except two: `cargo publish` in `rust-release.yml`, which only fires on a real
+version bump, and the `rust: false` input on the R workflows, which no package
+currently sets.
