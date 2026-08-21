@@ -1,0 +1,136 @@
+name: Python test
+
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: >-
+          JSON array of Python versions for the test matrix. A string rather
+          than a list because workflow_call inputs cannot be lists.
+        type: string
+        default: '["3.12","3.13"]'
+      windows:
+        description: >-
+          Include windows-latest in the test matrix. Off by default: these are
+          data pipelines rather than cross-platform libraries, and Windows path
+          handling is a cost nobody is paying for yet.
+        type: boolean
+        default: false
+      macos:
+        description: Include macos-latest in the test matrix.
+        type: boolean
+        default: true
+      sync-args:
+        description: >-
+          Args appended to `uv sync`. Defaults to pulling every extra so the
+          optional backends are import-checked too.
+        type: string
+        default: '--all-extras'
+      test-args:
+        description: Args appended to `uv run pytest`, e.g. "-m 'not integration'".
+        type: string
+        default: ''
+      ty:
+        description: Run `uv run ty check` in the lint job.
+        type: boolean
+        default: true
+      ty-required:
+        description: >-
+          Fail the lint job when ty reports a diagnostic. Set false while a
+          codebase is still being annotated: ty still runs and its output is in
+          the log, it just does not gate the merge.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 20
+
+env:
+  # uv resolves against this rather than whatever the runner image ships, so a
+  # runner bump cannot silently change the interpreter under the matrix.
+  UV_PYTHON_PREFERENCE: only-managed
+  FORCE_COLOR: '1'
+
+jobs:
+  matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.build.outputs.os }}
+    steps:
+      - id: build
+        run: |
+          cfg='["ubuntu-latest"]'
+          if [ '${{ inputs.macos }}' = 'true' ]; then
+            cfg=$(jq -c '. + ["macos-latest"]' <<< "$cfg")
+          fi
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cfg=$(jq -c '. + ["windows-latest"]' <<< "$cfg")
+          fi
+          echo "os=$cfg" >> "$GITHUB_OUTPUT"
+
+  # Separate from the test matrix on purpose. Lint and typecheck results do not
+  # vary by OS or interpreter, so running them once beats running them six
+  # times and reporting the same failure six times.
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        # shellcheck disable=SC2086  # word splitting is the point here
+        run: uv sync --dev ${{ inputs.sync-args }}
+
+      - name: Check the lockfile is current
+        run: uv lock --check
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github
+
+      - name: ruff format
+        run: uv run ruff format --check
+
+      - name: ty check
+        if: inputs.ty
+        continue-on-error: ${{ !inputs.ty-required }}
+        run: uv run ty check
+
+  test:
+    needs: matrix
+    name: py${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.os) }}
+        python: ${{ fromJSON(inputs.python-versions) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        shell: bash
+        # shellcheck disable=SC2086
+        run: uv sync --dev ${{ inputs.sync-args }}
+
+      - name: Run tests
+        shell: bash
+        # shellcheck disable=SC2086
+        run: uv run pytest ${{ inputs.test-args }}

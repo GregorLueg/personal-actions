@@ -1,0 +1,156 @@
+name: Python release
+
+on:
+  workflow_call:
+    inputs:
+      publish:
+        description: >-
+          Publish to PyPI. Set false for a package that should be tagged and
+          released on GitHub but not distributed.
+        type: boolean
+        default: true
+      build-args:
+        description: Args appended to `uv build`, e.g. "--sdist".
+        type: string
+        default: ''
+      timeout-minutes:
+        type: number
+        default: 20
+
+jobs:
+  release:
+    name: Check version and release
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    permissions:
+      contents: write
+      # PyPI trusted publishing. No long-lived token to leak, which is why this
+      # diverges from the CARGO_REGISTRY_TOKEN pattern in rust-release.yml. It
+      # needs a publisher configured on PyPI for this repo and workflow file
+      # before the first release, otherwise the publish step 403s.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      # Section aware, so a [tool.poetry] or [project.optional-dependencies]
+      # table cannot shadow the real [project] fields.
+      - name: Read name and version from pyproject.toml
+        id: pkg
+        run: |
+          name=$(awk -F'"' '/^\[/{s=$0} s=="[project]" && /^name *=/{print $2; exit}' pyproject.toml)
+          version=$(awk -F'"' '/^\[/{s=$0} s=="[project]" && /^version *=/{print $2; exit}' pyproject.toml)
+          if [ -z "$name" ] || [ -z "$version" ]; then
+            echo "::error::could not read name/version from [project] in pyproject.toml"
+            exit 1
+          fi
+          {
+            echo "name=$name"
+            echo "version=$version"
+            echo "tag=v$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the tag exists
+        id: tag
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A yanked release still returns 200, which is what we want: a yank must
+      # never trigger a republish of the same number. PyPI also refuses to
+      # reuse a filename, so a second attempt would fail anyway. Anything that
+      # is neither 200 nor 404 fails the job rather than being guessed at.
+      - name: Check whether the version is on PyPI
+        id: pypi
+        if: inputs.publish
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          url="https://pypi.org/pypi/$NAME/$VERSION/json"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: personal-actions (github.com/GregorLueg/personal-actions)' \
+            --retry 3 --retry-delay 5 --retry-connrefused "$url")
+          case "$code" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "$NAME $VERSION is already on PyPI"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::PyPI returned $code for $url"
+              exit 1
+              ;;
+          esac
+
+      - name: Create and push the tag
+        id: push-tag
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create the GitHub release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: Release ${{ steps.pkg.outputs.tag }}
+          generate_release_notes: true
+
+      # Recovery path: the tag was cut by an earlier run, so HEAD may have moved
+      # on since. Build what the release tag actually points at.
+      - name: Check out the existing tag before building
+        if: steps.tag.outputs.exists == 'true' && steps.pypi.outputs.published == 'false'
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: git checkout --detach "$TAG"
+
+      - uses: astral-sh/setup-uv@v6
+        if: steps.pypi.outputs.published == 'false'
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build the distributions
+        if: steps.pypi.outputs.published == 'false'
+        # shellcheck disable=SC2086  # word splitting is the point here
+        run: uv build ${{ inputs.build-args }}
+
+      # `always` rather than `automatic` so a missing OIDC token is an error
+      # instead of a silent fallback to a token that is not configured.
+      - name: Publish to PyPI
+        id: publish
+        if: steps.pypi.outputs.published == 'false'
+        run: uv publish --trusted-publishing always
+
+      # Publishing is irreversible, so say what happened without making someone
+      # read the log for it.
+      - name: Summary
+        if: always() && steps.pkg.outputs.version != ''
+        env:
+          SUMMARY: |
+            ### ${{ steps.pkg.outputs.name }} ${{ steps.pkg.outputs.version }}
+
+            - tag `${{ steps.pkg.outputs.tag }}`: ${{ steps.tag.outputs.exists == 'true' && 'already existed' || steps.push-tag.outcome }}
+            - PyPI: ${{ !inputs.publish && 'skipped' || (steps.pypi.outputs.published == 'true' && 'already published' || steps.publish.outcome) }}
+        run: echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"

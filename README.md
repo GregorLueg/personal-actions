@@ -1,8 +1,9 @@
 # personal-actions
 
-Reusable GitHub Actions workflows for my R packages and Rust crates. The CI
-logic lives here once. Consuming repos keep a thin caller pinned to `@v1`, so
-fixing a cache key is one commit plus a tag move rather than eleven PRs.
+Reusable GitHub Actions workflows for my R packages, Rust crates and Python
+packages. The CI logic lives here once. Consuming repos keep a thin caller
+pinned to `@v1`, so fixing a cache key is one commit plus a tag move rather than
+eleven PRs.
 
 Scaffolding that has to exist inside each repo, the callers included, is shipped
 by the copier template in
@@ -17,10 +18,12 @@ by the copier template in
 | `r-auto-tag.yml` | Tag and release on a version bump, gated on a green check |
 | `rust-test.yml` | Crate tests, CPU and GPU lanes |
 | `rust-release.yml` | Tag, release and `cargo publish`, gated on a green test |
+| `python-test.yml` | ruff, ty and pytest over an OS x interpreter matrix |
+| `python-release.yml` | Tag, release and `uv publish`, gated on a green test |
 
-Consumers: five R packages and six Rust crates. `node2vec-rs` uses
-`rust-test.yml` but keeps a bespoke release, because it cross-compiles binaries
-for three targets and attaches them as release assets.
+Consumers: five R packages, six Rust crates and one Python package.
+`node2vec-rs` uses `rust-test.yml` but keeps a bespoke release, because it
+cross-compiles binaries for three targets and attaches them as release assets.
 
 ### `r-cmd-check.yml`
 
@@ -224,6 +227,97 @@ The `timeout-minutes` default matters more here than in `rust-test.yml`. Without
 it the job inherits GitHub's 6-hour cap, and an `apt-get install r-base-dev`
 that wedges on a bad mirror will happily use all of it, which is exactly what
 broke the 0.4.5 release.
+
+### `python-test.yml`
+
+```yaml
+name: Python test
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    uses: GregorLueg/personal-actions/.github/workflows/python-test.yml@v1
+    with:
+      python-versions: '["3.12","3.13"]'
+      windows: false
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `python-versions` | string | `'["3.12","3.13"]'` | JSON array. A string because `workflow_call` inputs cannot be lists. |
+| `windows` | boolean | `false` | Adds `windows-latest` to the matrix. |
+| `macos` | boolean | `true` | Adds `macos-latest` to the matrix. |
+| `sync-args` | string | `--all-extras` | Appended to `uv sync`. Pulls every extra so optional backends are import-checked. |
+| `test-args` | string | `''` | Appended to `uv run pytest`, e.g. `-m 'not integration'`. |
+| `ty` | boolean | `true` | Run `uv run ty check`. |
+| `ty-required` | boolean | `true` | Whether a ty diagnostic fails the lint job. |
+| `timeout-minutes` | number | `20` | |
+
+Windows is off by default here and on in `rust-test.yml`. The Python consumers
+are data pipelines, not cross-platform libraries, so Windows path handling is a
+cost nobody is paying for yet.
+
+Lint and typecheck live in their own Linux-only job. Neither result varies by OS
+or interpreter, so running them once beats reporting the same ruff failure six
+times. `uv lock --check` runs alongside them: a lockfile that has drifted from
+`pyproject.toml` makes every other result meaningless.
+
+`ty-required: false` is the incremental-adoption knob. ty still runs and its
+output is in the log, it just does not gate the merge. Use it while annotating
+an existing codebase, and delete it once the diagnostics are at zero.
+
+### `python-release.yml`
+
+Same shape as `rust-release.yml`: triggered by a completed test run, not a push.
+
+```yaml
+name: Release
+on:
+  workflow_run:
+    workflows: ["Python test"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  release:
+    uses: GregorLueg/personal-actions/.github/workflows/python-release.yml@v1
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `publish` | boolean | `true` | Set false to tag and release on GitHub without distributing. |
+| `build-args` | string | `''` | Appended to `uv build`, e.g. `--sdist`. |
+| `timeout-minutes` | number | `20` | |
+
+It reads `name` and `version` from the `[project]` table in `pyproject.toml`,
+then runs the same two **independent** gates as `rust-release.yml`:
+
+- tag `v$version` missing -> create the tag and cut a release with generated notes
+- `$version` missing from PyPI -> `uv build` and `uv publish`
+
+The PyPI check is `GET https://pypi.org/pypi/{name}/{version}/json`. Anything
+that is neither 200 nor 404 fails the job. Yanked versions return 200, so a yank
+never triggers a republish.
+
+**No `secrets: inherit` here, and no API token.** Publishing goes through PyPI
+trusted publishing over OIDC, which is why the caller needs `id-token: write`.
+That means a one-off setup step: add a trusted publisher on PyPI for the repo,
+naming this workflow file, before the first release. Without it the publish step
+403s. `--trusted-publishing always` rather than `automatic`, so a missing OIDC
+token is an error instead of a silent fallback to a token that does not exist.
+
+**`uv publish` is irreversible.** PyPI will not accept a re-upload of a version
+or even of a filename, so the PyPI check is the only thing standing between a
+merge and a permanent mistake. It runs before anything is pushed anywhere.
 
 ## Versioning
 
