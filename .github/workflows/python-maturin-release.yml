@@ -1,0 +1,355 @@
+name: Python maturin release
+
+# The maturin sibling of `python-release.yml`. That one runs `uv build`, which
+# produces one wheel for whatever runner it lands on. A compiled extension needs
+# a wheel per platform, so the build half is a matrix and the publish half
+# collects the artefacts.
+#
+# Same two independent gates as `rust-release.yml`:
+#
+#   - tag missing        -> create the tag and cut a GitHub release
+#   - version not on PyPI -> build the wheels and publish
+#
+# Nothing links them. A run that dies between them is recoverable by dispatching
+# the caller again: the tag half skips and the publish half proceeds.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory holding Cargo.toml and pyproject.toml.
+        type: string
+        default: python
+      tag-prefix:
+        description: >-
+          Prefix for the release tag. `py-v` rather than `v` because the
+          bindings usually live inside the crate's own repo, where the crate
+          release already owns `v$version`. Two workflows tagging the same name
+          is a race with a permanent loser.
+        type: string
+        default: py-v
+      tag:
+        description: >-
+          Create the tag and cut the GitHub release. Set false together with
+          `publish: false` for a pure build rehearsal: the wheel matrix runs
+          against the triggering commit and nothing is written anywhere.
+        type: boolean
+        default: true
+      publish:
+        description: >-
+          Publish to PyPI. Set false to tag and build without distributing.
+        type: boolean
+        default: true
+      repository-url:
+        description: >-
+          Index to publish to. Point it at https://test.pypi.org/legacy/ for a
+          rehearsal; that needs its own trusted publisher configured.
+        type: string
+        default: ''
+      environment:
+        description: >-
+          GitHub environment gating the publish job. Set it to something with a
+          required reviewer and a release waits for a click. Worth having for
+          the first few, given a PyPI upload cannot be undone.
+        type: string
+        default: ''
+      linux-target:
+        description: Rust target for the manylinux wheel.
+        type: string
+        default: x86_64
+      manylinux:
+        description: >-
+          manylinux tag for the Linux wheel. `auto` lets maturin-action pick the
+          oldest container that works, which is what gets the widest install
+          base.
+        type: string
+        default: auto
+      maturin-args:
+        description: >-
+          Args appended to every `maturin build`, e.g. "--no-default-features"
+          for a smaller wheel. Applied to the sdist too.
+        type: string
+        default: ''
+      sdist:
+        description: >-
+          Also build and publish a source distribution. A crate whose bindings
+          sit in a subdirectory with a `path` dependency on the parent may not
+          produce an sdist that builds; verify with `maturin sdist` and a clean
+          install before turning this on.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 45
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Reads the version, decides both gates, and cuts the tag. Everything
+  # downstream keys off its outputs, so nothing gets built for a version that
+  # is already out.
+  version:
+    name: Check version and tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    permissions:
+      contents: write
+    outputs:
+      name: ${{ steps.pkg.outputs.name }}
+      version: ${{ steps.pkg.outputs.version }}
+      tag: ${{ steps.pkg.outputs.tag }}
+      # What the build jobs check out. The release tag once there is one, so a
+      # tag cut by an earlier run is what gets built even if HEAD has moved on
+      # since; the triggering commit otherwise.
+      ref: ${{ steps.ref.outputs.ref }}
+      should-build: ${{ steps.pypi.outputs.published != 'true' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      # Two files, not one. The distribution name lives in `[project]` in
+      # pyproject.toml and is not the crate name; the version lives in
+      # `[package]` in Cargo.toml, because maturin projects declare
+      # `dynamic = ["version"]` and read it from there. Both reads are section
+      # aware, so a `[tool.*]` or `[dependencies]` table cannot shadow them.
+      - name: Read the name and version
+        id: pkg
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          name=$(awk -F'"' '/^\[/{s=$0} s=="[project]" && /^name *=/{print $2; exit}' pyproject.toml)
+          version=$(awk -F'"' '/^\[/{s=$0} s=="[package]" && /^version *=/{print $2; exit}' Cargo.toml)
+          if [ -z "$name" ]; then
+            echo "::error::could not read name from [project] in pyproject.toml"
+            exit 1
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::could not read version from [package] in Cargo.toml"
+            exit 1
+          fi
+          {
+            echo "name=$name"
+            echo "version=$version"
+            echo "tag=${{ inputs.tag-prefix }}$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the tag exists
+        id: tag
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A yanked release still returns 200, which is what we want: a yank must
+      # never trigger a republish of the same number. PyPI also refuses to
+      # reuse a filename, so a second attempt would fail anyway. Anything that
+      # is neither 200 nor 404 fails the job rather than being guessed at.
+      - name: Check whether the version is on PyPI
+        id: pypi
+        if: inputs.publish && inputs.repository-url == ''
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          url="https://pypi.org/pypi/$NAME/$VERSION/json"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: personal-actions (github.com/GregorLueg/personal-actions)' \
+            --retry 3 --retry-delay 5 --retry-connrefused "$url")
+          case "$code" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "$NAME $VERSION is already on PyPI"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::PyPI returned $code for $url"
+              exit 1
+              ;;
+          esac
+
+      - name: Create and push the tag
+        id: push-tag
+        if: inputs.tag && steps.tag.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create the GitHub release
+        if: inputs.tag && steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: Release ${{ steps.pkg.outputs.tag }}
+          generate_release_notes: true
+
+      - name: Decide what the build jobs check out
+        id: ref
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+          EXISTED: ${{ steps.tag.outputs.exists }}
+          PUSHED: ${{ steps.push-tag.outcome }}
+          FALLBACK: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [ "$EXISTED" = 'true' ] || [ "$PUSHED" = 'success' ]; then
+            echo "ref=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$FALLBACK" >> "$GITHUB_OUTPUT"
+          fi
+
+  # One wheel per platform. abi3 means a single wheel covers every supported
+  # interpreter, so the matrix is platforms only. Whatever the release tag
+  # points at is what gets built: the tag may have been cut by an earlier run
+  # and HEAD moved on since.
+  wheels:
+    name: Wheel for ${{ matrix.name }}
+    needs: version
+    if: needs.version.outputs.should-build == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            target: ${{ inputs.linux-target }}
+            manylinux: ${{ inputs.manylinux }}
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64
+            manylinux: auto
+          - name: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.version.outputs.ref }}
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: ${{ inputs.working-directory }}
+          args: --release --out dist ${{ inputs.maturin-args }}
+          sccache: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: ${{ inputs.working-directory }}/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    needs: version
+    if: needs.version.outputs.should-build == 'true' && inputs.sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.version.outputs.ref }}
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          working-directory: ${{ inputs.working-directory }}
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: ${{ inputs.working-directory }}/dist/*.tar.gz
+          if-no-files-found: error
+
+  # Its own job so the environment gate sits on the irreversible step and
+  # nothing else. `always()` plus the explicit result checks, rather than a
+  # plain `needs`, so a skipped sdist job does not skip the publish with it.
+  publish:
+    name: Publish to PyPI
+    needs: [version, wheels, sdist]
+    if: >-
+      always() &&
+      inputs.publish &&
+      needs.version.outputs.should-build == 'true' &&
+      needs.wheels.result == 'success' &&
+      needs.sdist.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      # Trusted publishing over OIDC. No long-lived token to leak, which is why
+      # this diverges from the CARGO_REGISTRY_TOKEN pattern in
+      # `rust-release.yml`. It needs a publisher configured on PyPI naming the
+      # *calling* repo's workflow file before the first release, otherwise the
+      # publish step 403s.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: List what is about to be uploaded
+        run: ls -la dist
+
+      # The URL is spelled out rather than left to the action's default,
+      # because an empty `repository-url` input would override that default
+      # with nothing rather than falling back to it.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          repository-url: ${{ inputs.repository-url || 'https://upload.pypi.org/legacy/' }}
+          print-hash: true
+
+  # Publishing is irreversible, so say what happened without making someone
+  # read the log for it.
+  summary:
+    name: Summary
+    needs: [version, wheels, sdist, publish]
+    if: always() && needs.version.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SUMMARY: |
+            ### ${{ needs.version.outputs.name }} ${{ needs.version.outputs.version }}
+
+            - tag `${{ needs.version.outputs.tag }}`: ${{ inputs.tag && 'requested' || 'skipped (tag: false)' }}
+            - already on PyPI: ${{ needs.version.outputs.should-build == 'true' && 'no' || 'yes, nothing built' }}
+            - wheels: ${{ needs.wheels.result }}
+            - sdist: ${{ needs.sdist.result }}
+            - publish: ${{ needs.publish.result }}
+            - index: ${{ inputs.repository-url || 'https://upload.pypi.org/legacy/' }}
+        run: echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"

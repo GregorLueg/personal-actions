@@ -20,8 +20,20 @@ by the copier template in
 | `rust-release.yml` | Tag, release and `cargo publish`, gated on a green test |
 | `python-test.yml` | ruff, ty and pytest over an OS x interpreter matrix |
 | `python-release.yml` | Tag, release and `uv publish`, gated on a green test |
+| `python-maturin-test.yml` | The same, plus cargo, for a PyO3 extension |
+| `python-maturin-release.yml` | Tag, release and a per-platform wheel matrix to PyPI |
+| `python-docs.yml` | Build the mkdocs site, deploy on non-PR events |
 
-Consumers: five R packages, six Rust crates and one Python package.
+**Two Python pairs, not one.** The `python-*` pair is for a pure-Python uv
+project: `uv sync`, `uv lock --check`, `uv build`. The `python-maturin-*` pair
+is for a PyO3 extension, which has a cargo workspace, no uv lockfile, a compile
+step between install and test, and needs a wheel per platform rather than the
+one `uv build` produces for whatever runner it lands on. Neither is a superset
+of the other, which is why they are separate files rather than a pile of inputs
+on one.
+
+Consumers: five R packages, six Rust crates and two Python packages
+(`ann-search-rs` is the maturin one).
 `node2vec-rs` uses `rust-test.yml` but keeps a bespoke release, because it
 cross-compiles binaries for three targets and attaches them as release assets.
 
@@ -319,6 +331,192 @@ token is an error instead of a silent fallback to a token that does not exist.
 or even of a filename, so the PyPI check is the only thing standing between a
 merge and a permanent mistake. It runs before anything is pushed anywhere.
 
+### `python-maturin-test.yml`
+
+For a PyO3 extension whose bindings live in a subdirectory of the crate's own
+repo. Same lint/matrix split as `python-test.yml`, with cargo either side of it.
+
+```yaml
+name: Test the Python bindings
+on:
+  push:
+    branches: [main]
+    paths: ['python/**', 'src/**', 'Cargo.toml', '.github/workflows/python-test.yml']
+  pull_request:
+    branches: [main]
+    paths: ['python/**', 'src/**', 'Cargo.toml', '.github/workflows/python-test.yml']
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    uses: GregorLueg/personal-actions/.github/workflows/python-maturin-test.yml@v1
+    with:
+      package: ann_search
+      extra-deps: 'scikit-learn'
+      cpu-only-args: '--no-default-features'
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `working-directory` | string | `python` | Where `Cargo.toml` and `pyproject.toml` live. |
+| `package` | string | `''` | Import name, for `ty check`. Defaults to the directory's basename, which is wrong whenever that is `python`. |
+| `python-versions` | string | `'["3.10","3.13"]'` | JSON array. |
+| `macos` | boolean | `true` | |
+| `windows` | boolean | `false` | |
+| `maturin-args` | string | `--release` | Appended to `maturin develop`. |
+| `test-args` | string | `tests -q` | Appended to `pytest`. |
+| `install-args` | string | `--all-extras` | Args for `uv pip install -r pyproject.toml`. |
+| `extra-deps` | string | `''` | Packages on top of the manifest, space separated. Test-only deps that do not belong in an extra. |
+| `rust-lint` | boolean | `true` | `cargo fmt --check` and `cargo clippy -D warnings`. |
+| `rust-test` | boolean | `true` | `cargo test` on the bindings crate. |
+| `ty` / `ty-required` | boolean | `true` | As in `python-test.yml`. |
+| `cpu-only-args` | string | `''` | A second, feature-reduced lane. **Empty skips it.** |
+| `timeout-minutes` | number | `30` | |
+
+The Python matrix defaults to the **ends** of the supported range rather than
+every version in it. With `abi3-py310` one wheel covers 3.10 through 3.14, so
+testing the middle proves nothing the ends don't.
+
+`--release` is not optional on a numerics crate. A debug build of the kernels is
+roughly an order of magnitude slower, and the recall assertions build real
+indices.
+
+`ty` runs against the source tree rather than an installed build, because it
+reads the `.pyi` stub for the compiled module. That keeps the lint job free of a
+maturin build, which is most of why it is a separate job at all. It still needs
+the third-party imports resolvable, so the job runs
+`uv pip install -r pyproject.toml --all-extras`, which pulls the declared
+dependencies without building the project. Without it every `import numpy` is an
+`unresolved-import` and the whole check is noise.
+
+The reduced lane is the `--no-default-features` build. On `ann-search-rs` that
+means CPU-only: hosted runners have no GPU adapter either way, so what it proves
+is that the smaller build compiles and that `import ann_search.gpu` fails with
+the message it is supposed to. Kernel correctness needs a runner with a device
+and is not in scope here.
+
+### `python-maturin-release.yml`
+
+Same shape as `rust-release.yml`: triggered by a completed test run, not a push.
+
+```yaml
+name: Release the Python bindings
+on:
+  workflow_run:
+    workflows: ["Test the Python bindings"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  release:
+    uses: GregorLueg/personal-actions/.github/workflows/python-maturin-release.yml@v1
+    with:
+      sdist: false
+      environment: pypi
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `working-directory` | string | `python` | |
+| `tag-prefix` | string | `py-v` | Prefix for the release tag. |
+| `tag` | boolean | `true` | Cut the tag and the GitHub release. False plus `publish: false` is a pure build rehearsal. |
+| `publish` | boolean | `true` | |
+| `repository-url` | string | `''` | Point at `https://test.pypi.org/legacy/` for a rehearsal. |
+| `environment` | string | `''` | GitHub environment gating the publish job. |
+| `linux-target` | string | `x86_64` | |
+| `manylinux` | string | `auto` | |
+| `maturin-args` | string | `''` | Appended to every `maturin build`. |
+| `sdist` | boolean | `false` | Also build a source distribution. |
+| `timeout-minutes` | number | `45` | |
+
+**The version comes from two files.** The distribution name is `name` in
+`[project]` of `pyproject.toml` and is not the crate name (`ann-search` against
+`ann-search-py`). The version is `version` in `[package]` of `Cargo.toml`,
+because a maturin project declares `dynamic = ["version"]` and maturin reads it
+from there. Both reads are section aware.
+
+**`tag-prefix` defaults to `py-v` rather than `v`.** The bindings usually sit
+inside the crate's own repo, where `rust-release.yml` already owns `v$version`
+and the two versions move together. Two workflows racing for one tag name has a
+permanent loser.
+
+The two gates are the same independent pair as `rust-release.yml`, so a run that
+dies between them is recoverable by dispatching the caller again. The build jobs
+check out the release tag once there is one, so what ships is what the tag points
+at even if `main` has moved on.
+
+`uv build` is replaced by a `PyO3/maturin-action@v1` matrix: manylinux on
+`ubuntu-latest`, `macos-14` for arm64 and `macos-15-intel` for x86_64, plus an
+optional sdist. abi3 means one wheel per platform covers every interpreter, so
+the matrix is platforms only. Artefacts upload, and a separate publish job
+collects them and runs `pypa/gh-action-pypi-publish`. Publishing is its own job
+so the environment gate sits on the irreversible step and nothing else.
+
+`sdist` is off by default and deliberately so. Bindings in a subdirectory carry
+a `path` dependency on the parent crate, and whether maturin vendors that into
+an sdist which then builds is a matter of fact rather than opinion. Check with
+`maturin sdist` and a clean `pip install dist/*.tar.gz` before turning it on. A
+PyO3 project with wheels and no sdist is common; one with an sdist nobody can
+build is worse.
+
+**No `secrets: inherit` and no API token**, same as `python-release.yml`.
+Trusted publishing over OIDC, so the caller needs `id-token: write` and PyPI
+needs a pending publisher naming the **caller's** workflow filename, not this
+one. The OIDC `workflow_ref` claim carries the top-level workflow, and getting
+it wrong is the usual cause of a 403 on a first publish.
+
+**PyPI is irreversible.** It will not accept a re-upload of a version or even of
+a filename. The existence check runs before anything is built or pushed.
+
+### `python-docs.yml`
+
+mkdocs-material for the narrative pages, mkdocstrings for an API reference
+generated out of the docstrings. The Python answer to `r-pkgdown.yml`, same
+discipline: a PR builds the site to prove it builds and publishes nothing.
+
+```yaml
+name: Python docs
+on:
+  push:
+    branches: [main]
+    paths: ['python/**', '.github/workflows/python-docs.yml']
+  pull_request:
+    branches: [main]
+    paths: ['python/**', '.github/workflows/python-docs.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  docs:
+    uses: GregorLueg/personal-actions/.github/workflows/python-docs.yml@v1
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `working-directory` | string | `python` | Where `mkdocs.yml` lives. |
+| `maturin` | boolean | `true` | Build the extension first. Off for a pure-Python package. |
+| `maturin-args` | string | `--release` | |
+| `docs-deps` | string | `mkdocs mkdocs-material mkdocstrings[python]` | |
+| `python-version` | string | `3.12` | |
+| `strict` | boolean | `true` | `mkdocs build --strict`. |
+| `timeout-minutes` | number | `30` | |
+
+The maturin step is the reason this cannot be a lint job in
+`python-maturin-test.yml`: mkdocstrings imports the package to read its
+docstrings, so a compiled extension has to exist first.
+
+`--strict` is on by default. A docs job that goes green on an unresolvable
+`:::` reference or a dead internal link is not doing anything.
+
+Deploy uses `JamesIves/github-pages-deploy-action` to `gh-pages`, as
+`r-pkgdown.yml` does, but leaves `clean` on. mkdocs renders the whole site every
+time, so a page dropped from the nav should disappear from the branch rather
+than linger as an orphan nobody can navigate to.
+
 ## Versioning
 
 Callers pin `@v1`. Releases are tagged `vX.Y.Z` and the major tag moves to point
@@ -341,10 +539,18 @@ end to end: `actions/checkout` inside a `workflow_call` checks out the calling
 repo, so there is no way to point one at a fixture package without a separate
 fixture repo. The real integration test is the first consumer going green.
 
-Worth knowing what that leaves untested. Every path here has now run in anger
-except two: `cargo publish` in `rust-release.yml`, which only fires on a real
-version bump, and the `rust: false` input on the R workflows, which no package
-currently sets.
+Worth knowing what that leaves untested. `cargo publish` in `rust-release.yml`
+only fires on a real version bump, and the `rust: false` input on the R
+workflows is set by no package. The three `python-maturin-*` and `python-docs`
+workflows are new and have not run at all: nothing in them beyond actionlint has
+been proven, and the wheel matrix in particular touches two things nobody here
+has built before, a manylinux container compiling the wgpu stack and a maturin
+sdist over a `path` dependency into a parent crate.
+
+Land those the careful way: point `ann-search-rs`' callers at the branch
+(`python-maturin-release.yml@feat/python-workflows` is valid), dispatch with
+`tag: false, publish: false` until the wheels build, then rehearse against
+TestPyPI, and only then move `v1`.
 
 The publish path is worth the extra care for that reason. Before moving `v1`
 after a change to `rust-release.yml`, point one consumer's caller at the branch
