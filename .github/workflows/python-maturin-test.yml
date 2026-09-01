@@ -1,0 +1,318 @@
+name: Python maturin test
+
+# The maturin sibling of `python-test.yml`. That one assumes a pure-Python uv
+# project: `uv sync`, `uv lock --check`, a lockfile. A PyO3 extension has a
+# cargo workspace, no uv lockfile, and a compile step between install and test,
+# so it needs its own shape rather than a pile of inputs on the other one.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: >-
+          Directory holding Cargo.toml and pyproject.toml. The bindings usually
+          live under `python/` in the crate's own repo.
+        type: string
+        default: python
+      package:
+        description: >-
+          Import name of the Python package, for `ty check`. Defaults to the
+          working directory's own name, which is wrong whenever the directory
+          is called `python`, so most callers set it.
+        type: string
+        default: ''
+      python-versions:
+        description: >-
+          JSON array of Python versions for the test matrix. A string rather
+          than a list because workflow_call inputs cannot be lists. With an
+          abi3 build one wheel covers the whole range, so the ends of it are
+          what matter and the middle buys nothing.
+        type: string
+        default: '["3.10","3.13"]'
+      macos:
+        description: Include macos-latest in the test matrix.
+        type: boolean
+        default: true
+      windows:
+        description: >-
+          Include windows-latest. Off by default: a GPU-enabled build is not
+          expected to work there, and the crate-level workflow already covers
+          Windows for the pure-Rust side.
+        type: boolean
+        default: false
+      maturin-args:
+        description: >-
+          Args appended to `maturin develop`. `--release` is not optional for a
+          numerics crate: a debug build of the kernels is roughly an order of
+          magnitude slower, and recall assertions build real indices.
+        type: string
+        default: '--release'
+      test-args:
+        description: Args appended to `pytest`, e.g. "-m 'not integration'".
+        type: string
+        default: 'tests -q'
+      install-args:
+        description: >-
+          Args for `uv pip install -r pyproject.toml`, which pulls the
+          project's declared dependencies without building it. `--all-extras`
+          so the optional backends are resolvable to ty and exercised by the
+          tests.
+        type: string
+        default: '--all-extras'
+      extra-deps:
+        description: >-
+          Packages installed on top of the manifest, space separated. For
+          test-only deps that do not belong in an extra, e.g.
+          "scikit-learn".
+        type: string
+        default: ''
+      rust-lint:
+        description: '`cargo fmt --check` and `cargo clippy -D warnings`.'
+        type: boolean
+        default: true
+      rust-test:
+        description: '`cargo test` on the bindings crate.'
+        type: boolean
+        default: true
+      ty:
+        description: Run `ty check` on the package.
+        type: boolean
+        default: true
+      ty-required:
+        description: >-
+          Fail the lint job when ty reports a diagnostic. Set false while a
+          codebase is still being annotated.
+        type: boolean
+        default: true
+      cpu-only-args:
+        description: >-
+          Args for a second, feature-reduced lane, e.g.
+          "--no-default-features". Empty skips the lane entirely. Proves the
+          reduced build compiles and that the optional import fails with the
+          message it is supposed to.
+        type: string
+        default: ''
+      timeout-minutes:
+        type: number
+        default: 30
+
+env:
+  # Debug info is the bulk of target/ and the cache restore is the dominant
+  # cost. Set here rather than in Cargo.toml so local builds keep backtraces.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  FORCE_COLOR: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.build.outputs.os }}
+    steps:
+      - id: build
+        run: |
+          cfg='["ubuntu-latest"]'
+          if [ '${{ inputs.macos }}' = 'true' ]; then
+            cfg=$(jq -c '. + ["macos-latest"]' <<< "$cfg")
+          fi
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cfg=$(jq -c '. + ["windows-latest"]' <<< "$cfg")
+          fi
+          echo "os=$cfg" >> "$GITHUB_OUTPUT"
+
+  # Linux-only and one interpreter, like the lint job in `python-test.yml`.
+  # None of these results vary by OS or Python version, and reporting the same
+  # clippy failure six times helps nobody.
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.rust-lint
+        with:
+          components: rustfmt, clippy
+
+      # The bindings are their own cargo workspace, so the cache key has to
+      # follow their Cargo.lock rather than the parent crate's.
+      - uses: Swatinem/rust-cache@v2
+        if: inputs.rust-lint
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: lint
+          cache-on-failure: true
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: cargo fmt
+        if: inputs.rust-lint
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        if: inputs.rust-lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: ruff check
+        run: uvx ruff check --output-format=github .
+
+      - name: ruff format
+        run: uvx ruff format --check .
+
+      - name: Resolve the package name
+        id: pkg
+        run: |
+          name='${{ inputs.package }}'
+          if [ -z "$name" ]; then
+            name=$(basename "$PWD")
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # ty reads the `.pyi` stub for the compiled module, so it never needs a
+      # maturin build, which is most of why this job is separate. It does need
+      # the third-party imports resolvable, and `-r pyproject.toml` installs
+      # the declared dependencies without building the project.
+      - name: Install dependencies for ty
+        if: inputs.ty
+        run: |
+          uv venv --python 3.12
+          # shellcheck disable=SC2086  # word splitting is the point here
+          uv pip install -r pyproject.toml ${{ inputs.install-args }} ${{ inputs.extra-deps }}
+
+      - name: ty check
+        if: inputs.ty
+        continue-on-error: ${{ !inputs.ty-required }}
+        run: uvx ty check "${{ steps.pkg.outputs.name }}"
+
+  test:
+    needs: matrix
+    name: py${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.os) }}
+        python: ${{ fromJSON(inputs.python-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Defender scans every file cargo and the cache extractor touch, which is
+      # a large multiplier on an IO-bound job. Must come before the cache step.
+      - name: Exclude build dirs from Defender (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionProcess "cargo.exe","rustc.exe","link.exe","ld.exe"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: ${{ matrix.os }}-py${{ matrix.python }}
+          cache-on-failure: true
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+
+      - name: Set up the environment
+        run: |
+          uv venv --python '${{ matrix.python }}'
+          # shellcheck disable=SC2086  # word splitting is the point here
+          uv pip install -r pyproject.toml ${{ inputs.install-args }} \
+            "maturin>=1.15,<2" pytest ${{ inputs.extra-deps }}
+
+      - name: cargo test
+        if: inputs.rust-test
+        run: cargo test
+
+      # `maturin develop` resolves and installs the project's own runtime
+      # dependencies, so numpy and friends do not need listing above.
+      - name: Build
+        # shellcheck disable=SC2086
+        run: uv run maturin develop ${{ inputs.maturin-args }}
+
+      - name: Test
+        # shellcheck disable=SC2086
+        run: uv run pytest ${{ inputs.test-args }}
+
+  # A second lane at reduced features. For ann-search-rs that is the CPU-only
+  # build: hosted runners have no adapter either way, so this proves the
+  # reduced build compiles and that the optional import fails loudly, not that
+  # any GPU kernel is correct. Kernel correctness needs a runner with a device.
+  reduced:
+    name: Reduced features
+    if: inputs.cpu-only-args != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: reduced
+          cache-on-failure: true
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up the environment
+        run: |
+          uv venv --python 3.12
+          # shellcheck disable=SC2086
+          uv pip install -r pyproject.toml ${{ inputs.install-args }} \
+            "maturin>=1.15,<2" pytest ${{ inputs.extra-deps }}
+
+      - name: cargo clippy
+        if: inputs.rust-lint
+        # shellcheck disable=SC2086
+        run: cargo clippy --all-targets ${{ inputs.cpu-only-args }} -- -D warnings
+
+      - name: cargo test
+        if: inputs.rust-test
+        # shellcheck disable=SC2086
+        run: cargo test ${{ inputs.cpu-only-args }}
+
+      - name: Build
+        # shellcheck disable=SC2086
+        run: uv run maturin develop ${{ inputs.maturin-args }} ${{ inputs.cpu-only-args }}
+
+      - name: Test
+        # shellcheck disable=SC2086
+        run: uv run pytest ${{ inputs.test-args }}

@@ -1,0 +1,123 @@
+name: Python docs
+
+# The Python answer to `r-pkgdown.yml`: mkdocs-material for the narrative pages,
+# mkdocstrings for the API reference generated out of the docstrings. Same
+# discipline as pkgdown, a PR builds the site to prove it builds and publishes
+# nothing.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory holding mkdocs.yml.
+        type: string
+        default: python
+      maturin:
+        description: >-
+          Build a compiled extension before the docs. mkdocstrings imports the
+          package to read its docstrings, so a PyO3 project needs this; a
+          pure-Python one does not.
+        type: boolean
+        default: true
+      maturin-args:
+        description: >-
+          Args appended to `maturin develop`. Release rather than debug: the
+          docs build imports the module but never runs a kernel, so this is
+          about matching what the test lane compiled rather than speed.
+        type: string
+        default: '--release'
+      docs-deps:
+        description: Packages the docs build needs, space separated.
+        type: string
+        default: 'mkdocs mkdocs-material mkdocstrings[python]'
+      python-version:
+        type: string
+        default: '3.12'
+      strict:
+        description: >-
+          Pass `--strict`, so an unresolvable mkdocstrings reference or a dead
+          internal link fails the build. On by default: a docs job that goes
+          green on a broken cross-reference is not doing anything.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 30
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  FORCE_COLOR: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  docs:
+    name: Build site
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: python-docs-${{ github.run_id }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.maturin
+
+      - uses: Swatinem/rust-cache@v2
+        if: inputs.maturin
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: docs
+          cache-on-failure: true
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up the environment
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          uv venv --python '${{ inputs.python-version }}'
+          deps='${{ inputs.docs-deps }}'
+          if [ '${{ inputs.maturin }}' = 'true' ]; then
+            deps="maturin>=1.15,<2 $deps"
+          fi
+          # shellcheck disable=SC2086  # word splitting is the point here
+          uv pip install $deps
+
+      - name: Build the extension
+        if: inputs.maturin
+        working-directory: ${{ inputs.working-directory }}
+        # shellcheck disable=SC2086
+        run: uv run maturin develop ${{ inputs.maturin-args }}
+
+      - name: Build the site
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          args=''
+          if [ '${{ inputs.strict }}' = 'true' ]; then
+            args='--strict'
+          fi
+          # shellcheck disable=SC2086
+          uv run mkdocs build $args
+
+      # The guard is the point. Without it any PR into main publishes unmerged
+      # docs to gh-pages.
+      #
+      # `clean` is left on, unlike r-pkgdown.yml: mkdocs renders the whole site
+      # every time, so a page deleted from the nav should disappear from the
+      # branch rather than linger as an orphan nobody can navigate to.
+      - name: Deploy to GitHub pages
+        if: github.event_name != 'pull_request'
+        uses: JamesIves/github-pages-deploy-action@v4.7.3
+        with:
+          branch: gh-pages
+          folder: ${{ inputs.working-directory }}/site
