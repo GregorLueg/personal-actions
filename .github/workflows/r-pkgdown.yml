@@ -24,6 +24,13 @@ on:
           site that breaks when the image rolls.
         type: boolean
         default: true
+      extra-repositories:
+        description: >-
+          Extra CRAN-like repositories to add to the repos option, comma or
+          space separated. Use for r-universe, e.g.
+          https://gregorlueg.r-universe.dev.
+        type: string
+        default: ''
       extra-sysdeps:
         description: Extra apt packages, space separated.
         type: string
@@ -51,7 +58,7 @@ jobs:
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
-          extra-repositories: 'https://cloud.r-project.org'
+          extra-repositories: 'https://cloud.r-project.org ${{ inputs.extra-repositories }}'
 
       - name: Setup Rust
         if: inputs.rust
