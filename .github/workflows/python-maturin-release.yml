@@ -160,6 +160,25 @@ jobs:
       # never trigger a republish of the same number. PyPI also refuses to
       # reuse a filename, so a second attempt would fail anyway. Anything that
       # is neither 200 nor 404 fails the job rather than being guessed at.
+      # Cheap, and it runs before the wheel matrix. A bad value here used to
+      # cost three runners and ten minutes before the upload step rejected it,
+      # which is a long way to travel to learn that a text box had the wrong
+      # thing pasted into it.
+      - name: Validate the repository URL
+        if: inputs.repository-url != ''
+        env:
+          URL: ${{ inputs.repository-url }}
+        run: |
+          case "$URL" in
+            https://*/legacy/|https://*/legacy)
+              echo "publishing to $URL"
+              ;;
+            *)
+              echo "::error::repository-url must be an https upload endpoint ending in /legacy/, got '$URL'"
+              exit 1
+              ;;
+          esac
+
       - name: Check whether the version is on PyPI
         id: pypi
         if: inputs.publish && inputs.repository-url == ''
