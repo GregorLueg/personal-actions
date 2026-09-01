@@ -52,6 +52,7 @@ jobs:
 | `gpu` | boolean | `false` | Installs Vulkan on Linux, sets `WGPU_BACKEND=vulkan`. |
 | `windows` | boolean | `true` | Adds `windows-latest` to the matrix. |
 | `linux-runner` | string | `ubuntu-latest` | Pin to `ubuntu-22.04` where the toolchain needs it. |
+| `extra-repositories` | string | `''` | Extra CRAN-like repositories, comma or space separated. Use for r-universe, e.g. `https://gregorlueg.r-universe.dev`. |
 | `extra-sysdeps` | string | `''` | Extra apt packages, space separated. |
 | `rebuild-from-source` | string | `''` | R packages to reinstall from source on macOS after pak. |
 
@@ -85,7 +86,7 @@ jobs:
     secrets: inherit
 ```
 
-Inputs are `rust`, `gpu` and `extra-sysdeps`, same meaning as above. The deploy
+Inputs are `rust`, `gpu`, `extra-repositories` and `extra-sysdeps`, same meaning as above. The deploy
 step is guarded by `github.event_name != 'pull_request'`, so a PR builds the
 site to prove it builds and publishes nothing.
 

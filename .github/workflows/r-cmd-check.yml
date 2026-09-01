@@ -29,6 +29,13 @@ on:
         description: Linux runner label. ubuntu-22.04 where the toolchain needs it.
         type: string
         default: ubuntu-latest
+      extra-repositories:
+        description: >-
+          Extra CRAN-like repositories to add to the repos option, comma or
+          space separated. Use for r-universe, e.g.
+          https://gregorlueg.r-universe.dev.
+        type: string
+        default: ''
       extra-sysdeps:
         description: Extra apt packages, space separated.
         type: string
@@ -97,7 +104,7 @@ jobs:
         with:
           r-version: ${{ matrix.config.r }}
           use-public-rspm: true
-          extra-repositories: 'https://cloud.r-project.org'
+          extra-repositories: 'https://cloud.r-project.org ${{ inputs.extra-repositories }}'
 
       # extendr links against the gnu ABI on Windows, not msvc.
       - name: Setup Rust
