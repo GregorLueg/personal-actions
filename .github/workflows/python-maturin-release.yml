@@ -2,16 +2,22 @@ name: Python maturin release
 
 # The maturin sibling of `python-release.yml`. That one runs `uv build`, which
 # produces one wheel for whatever runner it lands on. A compiled extension needs
-# a wheel per platform, so the build half is a matrix and the publish half
-# collects the artefacts.
+# a wheel per platform, so the build half is a matrix.
+#
+# It stops at built artefacts. **The upload belongs to the caller**, and has to:
+# PyPI's trusted publishing matches the OIDC token's `job_workflow_ref`, which
+# for a reusable workflow names this file in this repository, and the publisher
+# form has no way to express that (pypi/warehouse#11096). A caller that
+# publishes from its own workflow gets a `job_workflow_ref` PyPI can match. See
+# the README for the dozen lines that takes.
 #
 # Same two independent gates as `rust-release.yml`:
 #
-#   - tag missing        -> create the tag and cut a GitHub release
-#   - version not on PyPI -> build the wheels and publish
+#   - tag missing         -> create the tag and cut a GitHub release
+#   - version not on PyPI -> build the wheels
 #
 # Nothing links them. A run that dies between them is recoverable by dispatching
-# the caller again: the tag half skips and the publish half proceeds.
+# the caller again: the tag half skips and the build half proceeds.
 
 on:
   workflow_call:
@@ -37,20 +43,16 @@ on:
         default: true
       publish:
         description: >-
-          Publish to PyPI. Set false to tag and build without distributing.
+          Check the index before building, and skip the wheel matrix when the
+          version is already there. It does not upload: the caller owns that
+          step, see the README. Set false to build unconditionally.
         type: boolean
         default: true
       repository-url:
         description: >-
-          Index to publish to. Point it at https://test.pypi.org/legacy/ for a
-          rehearsal; that needs its own trusted publisher configured.
-        type: string
-        default: ''
-      environment:
-        description: >-
-          GitHub environment gating the publish job. Set it to something with a
-          required reviewer and a release waits for a click. Worth having for
-          the first few, given a PyPI upload cannot be undone.
+          Which index the version check consults. Point it at
+          https://test.pypi.org/legacy/ for a rehearsal, which skips the check
+          entirely since TestPyPI is not a record of what is released.
         type: string
         default: ''
       linux-target:
@@ -81,6 +83,21 @@ on:
       timeout-minutes:
         type: number
         default: 45
+    outputs:
+      name:
+        description: Distribution name from `[project]` in pyproject.toml.
+        value: ${{ jobs.version.outputs.name }}
+      version:
+        description: Version from `[package]` in Cargo.toml.
+        value: ${{ jobs.version.outputs.version }}
+      tag:
+        description: The release tag, prefix included.
+        value: ${{ jobs.version.outputs.tag }}
+      should-build:
+        description: >-
+          False when the version is already on the index, in which case nothing
+          was built and the caller must not try to publish.
+        value: ${{ jobs.version.outputs.should-build }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -312,52 +329,23 @@ jobs:
           path: ${{ inputs.working-directory }}/dist/*.tar.gz
           if-no-files-found: error
 
-  # Its own job so the environment gate sits on the irreversible step and
-  # nothing else. `always()` plus the explicit result checks, rather than a
-  # plain `needs`, so a skipped sdist job does not skip the publish with it.
-  publish:
-    name: Publish to PyPI
-    needs: [version, wheels, sdist]
-    if: >-
-      always() &&
-      inputs.publish &&
-      needs.version.outputs.should-build == 'true' &&
-      needs.wheels.result == 'success' &&
-      needs.sdist.result != 'failure'
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    environment: ${{ inputs.environment }}
-    permissions:
-      # Trusted publishing over OIDC. No long-lived token to leak, which is why
-      # this diverges from the CARGO_REGISTRY_TOKEN pattern in
-      # `rust-release.yml`. It needs a publisher configured on PyPI naming the
-      # *calling* repo's workflow file before the first release, otherwise the
-      # publish step 403s.
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: dist-*
-          merge-multiple: true
-          path: dist
-
-      - name: List what is about to be uploaded
-        run: ls -la dist
-
-      # The URL is spelled out rather than left to the action's default,
-      # because an empty `repository-url` input would override that default
-      # with nothing rather than falling back to it.
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          repository-url: ${{ inputs.repository-url || 'https://upload.pypi.org/legacy/' }}
-          print-hash: true
+  # There is deliberately no publish job here.
+  #
+  # PyPI's trusted publishing cannot name a reusable workflow: the OIDC token's
+  # `job_workflow_ref` would point at this file in this repository, and the
+  # publisher form has no way to express that (pypi/warehouse#11096). So the
+  # upload has to run in the calling repository's own workflow, where
+  # `job_workflow_ref` is the caller and PyPI can match it.
+  #
+  # This workflow therefore stops at built artefacts named `dist-*`, and
+  # exposes `should-build` so the caller knows whether there is anything to
+  # upload. See the README for the dozen lines a caller needs.
 
   # Publishing is irreversible, so say what happened without making someone
   # read the log for it.
   summary:
     name: Summary
-    needs: [version, wheels, sdist, publish]
+    needs: [version, wheels, sdist]
     if: always() && needs.version.result == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -369,6 +357,6 @@ jobs:
             - already on PyPI: ${{ needs.version.outputs.should-build == 'true' && 'no' || 'yes, nothing built' }}
             - wheels: ${{ needs.wheels.result }}
             - sdist: ${{ needs.sdist.result }}
-            - publish: ${{ needs.publish.result }}
-            - index: ${{ inputs.repository-url || 'https://upload.pypi.org/legacy/' }}
+            - index checked: ${{ inputs.repository-url || 'https://upload.pypi.org/legacy/' }}
+            - upload: the caller's own job, see the README
         run: echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"

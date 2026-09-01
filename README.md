@@ -21,7 +21,7 @@ by the copier template in
 | `python-test.yml` | ruff, ty and pytest over an OS x interpreter matrix |
 | `python-release.yml` | Tag, release and `uv publish`, gated on a green test |
 | `python-maturin-test.yml` | The same, plus cargo, for a PyO3 extension |
-| `python-maturin-release.yml` | Tag, release and a per-platform wheel matrix to PyPI |
+| `python-maturin-release.yml` | Tag, release and a per-platform wheel matrix; the caller uploads |
 | `python-docs.yml` | Build the mkdocs site, deploy on non-PR events |
 
 **Two Python pairs, not one.** The `python-*` pair is for a pure-Python uv
@@ -323,10 +323,20 @@ never triggers a republish.
 
 **No `secrets: inherit` here, and no API token.** Publishing goes through PyPI
 trusted publishing over OIDC, which is why the caller needs `id-token: write`.
-That means a one-off setup step: add a trusted publisher on PyPI for the repo,
-naming this workflow file, before the first release. Without it the publish step
-403s. `--trusted-publishing always` rather than `automatic`, so a missing OIDC
-token is an error instead of a silent fallback to a token that does not exist.
+`--trusted-publishing always` rather than `automatic`, so a missing OIDC token
+is an error instead of a silent fallback to a token that does not exist.
+
+> **Untested, and probably broken.** This workflow runs `uv publish` inside a
+> reusable workflow, which is exactly the arrangement PyPI cannot express as a
+> trusted publisher: the token's `job_workflow_ref` names this repository and
+> the publisher form has no field for it ([pypi/warehouse#11096]). Nobody has
+> taken this path to a first publish, so it has never surfaced.
+> `python-maturin-release.yml` hit it and was restructured to hand the upload
+> back to the caller. This one wants the same treatment before it is used in
+> anger: expose the version gate as an output and let the caller run
+> `gh-action-pypi-publish` itself.
+
+[pypi/warehouse#11096]: https://github.com/pypi/warehouse/issues/11096
 
 **`uv publish` is irreversible.** PyPI will not accept a re-upload of a version
 or even of a filename, so the PyPI check is the only thing standing between a
@@ -400,6 +410,22 @@ and is not in scope here.
 ### `python-maturin-release.yml`
 
 Same shape as `rust-release.yml`: triggered by a completed test run, not a push.
+It builds and tags. **It does not upload.**
+
+**PyPI cannot name a reusable workflow as a trusted publisher.** The OIDC token
+carries `job_workflow_ref`, which for a reusable workflow points at this
+repository, and the publisher form has no field that can express that. It is a
+documented limitation, [pypi/warehouse#11096]. Configuring the form with the
+caller's filename does not help, because that is `workflow_ref`, a different
+claim. The failure is `invalid-publisher: valid token, but no corresponding
+publisher`, arriving after a full wheel matrix has been built.
+
+So the upload lives in the calling repository, where `job_workflow_ref` is the
+caller's own workflow and PyPI can match it. This workflow stops at artefacts
+named `dist-*` and exposes `should-build` so the caller knows whether there is
+anything to upload.
+
+[pypi/warehouse#11096]: https://github.com/pypi/warehouse/issues/11096
 
 ```yaml
 name: Release the Python bindings
@@ -413,26 +439,50 @@ permissions:
   contents: write
   id-token: write
 jobs:
-  release:
+  build:
     uses: GregorLueg/personal-actions/.github/workflows/python-maturin-release.yml@v1
     with:
       sdist: false
-      environment: pypi
+
+  publish:
+    needs: build
+    if: needs.build.outputs.should-build == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
 ```
+
+The trusted publisher on PyPI then names the **caller**: owner, the calling
+repo, the caller's workflow filename, and the environment the publish job runs
+in if it uses one.
 
 | input | type | default | what it does |
 |---|---|---|---|
 | `working-directory` | string | `python` | |
 | `tag-prefix` | string | `py-v` | Prefix for the release tag. |
-| `tag` | boolean | `true` | Cut the tag and the GitHub release. False plus `publish: false` is a pure build rehearsal. |
-| `publish` | boolean | `true` | |
-| `repository-url` | string | `''` | Point at `https://test.pypi.org/legacy/` for a rehearsal. |
-| `environment` | string | `''` | GitHub environment gating the publish job. |
+| `tag` | boolean | `true` | Cut the tag and the GitHub release. |
+| `publish` | boolean | `true` | Check the index first and skip the wheel matrix when the version is already there. It does not upload. |
+| `repository-url` | string | `''` | Which index the version check consults. `https://test.pypi.org/legacy/` skips the check. |
 | `linux-target` | string | `x86_64` | |
 | `manylinux` | string | `auto` | |
 | `maturin-args` | string | `''` | Appended to every `maturin build`. |
 | `sdist` | boolean | `false` | Also build a source distribution. |
 | `timeout-minutes` | number | `45` | |
+
+| output | what it is |
+|---|---|
+| `should-build` | False when the version is already on the index, so nothing was built. **Gate the caller's publish job on this.** |
+| `name` / `version` / `tag` | Read from the manifests, for a caller that wants to report them. |
 
 **The version comes from two files.** The distribution name is `name` in
 `[project]` of `pyproject.toml` and is not the crate name (`ann-search` against
@@ -442,20 +492,25 @@ from there. Both reads are section aware.
 
 **`tag-prefix` defaults to `py-v` rather than `v`.** The bindings usually sit
 inside the crate's own repo, where `rust-release.yml` already owns `v$version`
-and the two versions move together. Two workflows racing for one tag name has a
-permanent loser.
+and the two versions move independently. Two workflows racing for one tag name
+has a permanent loser.
 
 The two gates are the same independent pair as `rust-release.yml`, so a run that
 dies between them is recoverable by dispatching the caller again. The build jobs
 check out the release tag once there is one, so what ships is what the tag points
 at even if `main` has moved on.
 
-`uv build` is replaced by a `PyO3/maturin-action@v1` matrix: manylinux on
+Wheels come from a `PyO3/maturin-action@v1` matrix: manylinux on
 `ubuntu-latest`, `macos-14` for arm64 and `macos-15-intel` for x86_64, plus an
 optional sdist. abi3 means one wheel per platform covers every interpreter, so
-the matrix is platforms only. Artefacts upload, and a separate publish job
-collects them and runs `pypa/gh-action-pypi-publish`. Publishing is its own job
-so the environment gate sits on the irreversible step and nothing else.
+the matrix is platforms only.
+
+**Do not put the CubeCL `cpu` feature in a wheel.** It pulls
+`tracel-llvm-bundler`, a prebuilt LLVM needing glibc 2.33+, and no manylinux
+container can load it. `ann-search-rs` hit this and moved it behind a test-only
+feature. The symptom is `llvm-config: GLIBC_2.33 not found` in the Linux job
+while macOS arm64 passes, which makes it look platform-specific rather than
+like a dependency that should never have shipped.
 
 `sdist` is off by default and deliberately so. Bindings in a subdirectory carry
 a `path` dependency on the parent crate, and whether maturin vendors that into
@@ -463,12 +518,6 @@ an sdist which then builds is a matter of fact rather than opinion. Check with
 `maturin sdist` and a clean `pip install dist/*.tar.gz` before turning it on. A
 PyO3 project with wheels and no sdist is common; one with an sdist nobody can
 build is worse.
-
-**No `secrets: inherit` and no API token**, same as `python-release.yml`.
-Trusted publishing over OIDC, so the caller needs `id-token: write` and PyPI
-needs a pending publisher naming the **caller's** workflow filename, not this
-one. The OIDC `workflow_ref` claim carries the top-level workflow, and getting
-it wrong is the usual cause of a 403 on a first publish.
 
 **PyPI is irreversible.** It will not accept a re-upload of a version or even of
 a filename. The existence check runs before anything is built or pushed.
@@ -542,11 +591,22 @@ fixture repo. The real integration test is the first consumer going green.
 
 Worth knowing what that leaves untested. `cargo publish` in `rust-release.yml`
 only fires on a real version bump, and the `rust: false` input on the R
-workflows is set by no package. The three `python-maturin-*` and `python-docs`
-workflows are new and have not run at all: nothing in them beyond actionlint has
-been proven, and the wheel matrix in particular touches two things nobody here
-has built before, a manylinux container compiling the wgpu stack and a maturin
-sdist over a `path` dependency into a parent crate.
+workflows is set by no package. `uv publish` in `python-release.yml` has never
+run, and see the warning in that section: it is likely broken for the same
+reason `python-maturin-release.yml` was.
+
+`python-maturin-test.yml`, `python-docs.yml` and the build half of
+`python-maturin-release.yml` have now run in anger on `ann-search-rs`, wheels
+included. Two things they taught, both of which cost a full wheel matrix to
+discover:
+
+- A dependency that builds fine on macOS arm64 can be impossible on manylinux.
+  The CubeCL `cpu` feature pulls a prebuilt LLVM needing glibc 2.33+.
+- PyPI cannot name a reusable workflow as a trusted publisher, so the upload has
+  to run in the caller.
+
+The `sdist` path over a `path` dependency into a parent crate is still
+unexercised, which is why it defaults to off.
 
 Land those the careful way: point `ann-search-rs`' callers at the branch
 (`python-maturin-release.yml@feat/python-workflows` is valid), dispatch with
