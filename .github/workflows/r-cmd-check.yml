@@ -25,6 +25,13 @@ on:
         description: Include windows-latest in the matrix.
         type: boolean
         default: true
+      macos-x86:
+        description: >-
+          Include macos-15-intel in the matrix. macOS-latest is arm64, so this
+          is the only way to catch x86-only numerical differences before
+          r-universe does.
+        type: boolean
+        default: false
       linux-runner:
         description: Linux runner label. ubuntu-22.04 where the toolchain needs it.
         type: string
@@ -61,6 +68,9 @@ jobs:
             '[{os: "macOS-latest", r: "release"}, {os: $linux, r: "release"}]')
           if [ '${{ inputs.windows }}' = 'true' ]; then
             cfg=$(jq -c '. + [{os: "windows-latest", r: "release"}]' <<< "$cfg")
+          fi
+          if [ '${{ inputs.macos-x86 }}' = 'true' ]; then
+            cfg=$(jq -c '. + [{os: "macos-15-intel", r: "release"}]' <<< "$cfg")
           fi
           echo "config=$cfg" >> "$GITHUB_OUTPUT"
 

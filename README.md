@@ -66,6 +66,7 @@ jobs:
 | `rust-toolchain` | string | `stable` | Pin a version, e.g. `1.91.0`. The gnu suffix is appended on Windows. |
 | `gpu` | boolean | `false` | Installs Vulkan on Linux, sets `WGPU_BACKEND=vulkan`. |
 | `windows` | boolean | `true` | Adds `windows-latest` to the matrix. |
+| `macos-x86` | boolean | `false` | Adds `macos-15-intel` to the matrix. `macOS-latest` is arm64, so this is the only way to catch x86-only numerical differences before r-universe does. |
 | `linux-runner` | string | `ubuntu-latest` | Pin to `ubuntu-22.04` where the toolchain needs it. |
 | `extra-repositories` | string | `''` | Extra CRAN-like repositories, comma or space separated. Use for r-universe, e.g. `https://gregorlueg.r-universe.dev`. |
 | `extra-sysdeps` | string | `''` | Extra apt packages, space separated. |
