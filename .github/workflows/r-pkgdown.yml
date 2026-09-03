@@ -106,8 +106,22 @@ jobs:
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          extra-packages: any::pkgdown, local::.
+          # openssl and httr2 are what build_favicons needs. pkgdown only
+          # Suggests them, so they are not pulled in by needs: website.
+          extra-packages: any::pkgdown, any::openssl, any::httr2, local::.
           needs: website
+
+      # init_site refuses to build favicons on CI, so a package that has not
+      # committed pkgdown/favicon ships a site with no icons at all. Do it
+      # here instead. No-op once they exist, and neither a missing logo nor a
+      # dead realfavicongenerator is worth failing a docs build over.
+      - name: Build favicons
+        run: |
+          tryCatch(
+            pkgdown::build_favicons(),
+            error = function(e) message("Skipping favicons: ", conditionMessage(e))
+          )
+        shell: Rscript {0}
 
       - name: Build site
         run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE, quiet = FALSE)
