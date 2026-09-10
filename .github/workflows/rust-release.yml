@@ -15,6 +15,17 @@ on:
           needs R and the shared libR present.
         type: boolean
         default: false
+      python-owns-latest:
+        description: >-
+          Leave the repository's "Latest" release to the Python bindings rather
+          than claiming it for the crate. Only set this in a repo that ships
+          both: mkdocs-material's header widget reads GitHub's latest *release*,
+          with no tag filter, so whichever of `v*` and `py-v*` published last
+          wins and the Python docs site ends up advertising a crate version.
+          Crates with no bindings must leave this false, or their repo shows no
+          "Latest" release at all.
+        type: boolean
+        default: false
       timeout-minutes:
         type: number
         default: 30
@@ -111,6 +122,10 @@ jobs:
           tag_name: ${{ steps.pkg.outputs.tag }}
           name: Release ${{ steps.pkg.outputs.tag }}
           generate_release_notes: true
+          # `legacy` is the GitHub API default and is what every crate without
+          # bindings wants; `false` publishes the release without disturbing
+          # whichever `py-v*` tag currently holds "Latest".
+          make_latest: ${{ inputs.python-owns-latest && 'false' || 'legacy' }}
 
       - name: Install Rust
         if: steps.crate.outputs.published == 'false'
