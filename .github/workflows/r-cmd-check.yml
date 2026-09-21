@@ -114,7 +114,9 @@ jobs:
         with:
           r-version: ${{ matrix.config.r }}
           use-public-rspm: always
-          extra-repositories: 'https://cloud.r-project.org ${{ inputs.extra-repositories }}'
+          # No CRAN extra on macOS: pak picks some binaries from it over PPM, and
+          # CRAN currently ships zstd macOS binaries pak cannot extract.
+          extra-repositories: "${{ runner.os != 'macOS' && 'https://cloud.r-project.org' || '' }} ${{ inputs.extra-repositories }}"
 
       # extendr links against the gnu ABI on Windows, not msvc.
       - name: Setup Rust
