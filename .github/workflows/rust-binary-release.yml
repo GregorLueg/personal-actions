@@ -1,0 +1,167 @@
+name: Rust binary release
+
+on:
+  workflow_call:
+    inputs:
+      binary:
+        description: >-
+          Name of the cargo binary target to build and attach, e.g.
+          "splatter-sc". Assets are named `<binary>-<target>.tar.gz` (`.zip` on
+          Windows).
+        type: string
+        required: true
+      build-args:
+        description: >-
+          Args appended to `cargo build --release`, e.g. "--features
+          hdf5-static".
+        type: string
+        default: ''
+      windows:
+        description: Also build x86_64-pc-windows-msvc.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 30
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  plan:
+    name: Check the release and its assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.pkg.outputs.tag }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      build: ${{ steps.assets.outputs.build }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          persist-credentials: false
+
+      # Same section-aware read as rust-release.yml, so both agree on the tag.
+      - name: Read version from Cargo.toml
+        id: pkg
+        run: |
+          version=$(awk -F'"' '/^\[/{s=$0} s=="[package]" && /^version *=/{print $2; exit}' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::could not read version from [package] in Cargo.toml"
+            exit 1
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build matrix
+        id: matrix
+        run: |
+          cfg='[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","archive":"tar.gz"},
+                {"os":"macos-latest","target":"aarch64-apple-darwin","archive":"tar.gz"}]'
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cfg=$(jq -c '. + [{"os":"windows-latest","target":"x86_64-pc-windows-msvc","archive":"zip"}]' <<< "$cfg")
+          fi
+          echo "matrix=$(jq -c . <<< "$cfg")" >> "$GITHUB_OUTPUT"
+
+      # The calling release job runs on every green test of the default branch
+      # and only cuts a release on a version bump. Without this check every
+      # later push would rebuild and re-upload the same binaries.
+      - name: Check which assets are missing
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+          BINARY: ${{ inputs.binary }}
+          MATRIX: ${{ steps.matrix.outputs.matrix }}
+        run: |
+          if ! have=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); then
+            echo "::error::no GitHub release for $TAG; run rust-release.yml first"
+            exit 1
+          fi
+          want=$(jq -r --arg b "$BINARY" '.[] | "\($b)-\(.target).\(.archive)"' <<< "$MATRIX")
+          missing=$(comm -23 <(sort <<< "$want") <(sort <<< "$have"))
+          if [ '${{ github.event_name }}' = 'workflow_dispatch' ] || [ -n "$missing" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "building for $TAG; missing: ${missing:-none (manual dispatch)}"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "$TAG already has every asset"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      # Build the tag, not the triggering ref, so a manual re-run of an older
+      # release ships that release's code.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-release
+          cache-on-failure: true
+
+      - name: Build
+        shell: bash
+        # shellcheck disable=SC2086  # word splitting is the point here
+        run: cargo build --release --target ${{ matrix.target }} --bin ${{ inputs.binary }} ${{ inputs.build-args }}
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          tar -C target/${{ matrix.target }}/release -czf \
+            ${{ inputs.binary }}-${{ matrix.target }}.tar.gz ${{ inputs.binary }}
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/${{ inputs.binary }}.exe `
+            -DestinationPath ${{ inputs.binary }}-${{ matrix.target }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.binary }}-${{ matrix.target }}
+          path: ${{ inputs.binary }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  attach:
+    name: Attach to the release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      # `gh release upload` leaves the release's name, notes and "Latest" flag
+      # alone; --clobber makes a manual re-run replace the assets.
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release upload "$TAG" assets/* --repo "$GITHUB_REPOSITORY" --clobber
