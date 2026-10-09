@@ -25,6 +25,13 @@ on:
         description: Include windows-latest in the matrix.
         type: boolean
         default: true
+      windows-arm:
+        description: >-
+          Include windows-11-arm in the matrix. Rust targets
+          aarch64-pc-windows-gnullvm there, so the package Makevars.win must
+          pick that target on aarch64.
+        type: boolean
+        default: false
       macos-x86:
         description: >-
           Include macos-15-intel in the matrix. macOS-latest is arm64, so this
@@ -68,6 +75,9 @@ jobs:
             '[{os: "macOS-latest", r: "release"}, {os: $linux, r: "release"}]')
           if [ '${{ inputs.windows }}' = 'true' ]; then
             cfg=$(jq -c '. + [{os: "windows-latest", r: "release"}]' <<< "$cfg")
+          fi
+          if [ '${{ inputs.windows-arm }}' = 'true' ]; then
+            cfg=$(jq -c '. + [{os: "windows-11-arm", r: "release"}]' <<< "$cfg")
           fi
           if [ '${{ inputs.macos-x86 }}' = 'true' ]; then
             cfg=$(jq -c '. + [{os: "macos-15-intel", r: "release"}]' <<< "$cfg")
@@ -120,12 +130,13 @@ jobs:
           cran: ${{ runner.os == 'macOS' && 'https://packagemanager.posit.co/cran/latest' || '' }}
           extra-repositories: "${{ runner.os != 'macOS' && 'https://cloud.r-project.org' || '' }} ${{ inputs.extra-repositories }}"
 
-      # extendr links against the gnu ABI on Windows, not msvc.
+      # extendr links against the gnu ABI on Windows, not msvc. Rtools on arm64
+      # is llvm-mingw, hence gnullvm.
       - name: Setup Rust
         if: inputs.rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ runner.os == 'Windows' && format('{0}-x86_64-pc-windows-gnu', inputs.rust-toolchain) || inputs.rust-toolchain }}
+          toolchain: ${{ runner.os == 'Windows' && format(runner.arch == 'ARM64' && '{0}-aarch64-pc-windows-gnullvm' || '{0}-x86_64-pc-windows-gnu', inputs.rust-toolchain) || inputs.rust-toolchain }}
 
       # Optional. The action resolves the sccache release through the GitHub
       # API and that call fails intermittently on the hosted macOS runners
