@@ -166,6 +166,11 @@ jobs:
             echo "CARGO_PROFILE_RELEASE_LTO=false"
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
           } >> "$GITHUB_ENV"
+          # Same as r-universe's windows-prep: R reports an empty $(WIN) on
+          # arm64, so packages read the triple from here.
+          if [ "${{ runner.os }}" = "Windows" ] && [ "${{ runner.arch }}" = "ARM64" ]; then
+            echo "CARGO_BUILD_TARGET=aarch64-pc-windows-gnullvm" >> "$GITHUB_ENV"
+          fi
 
       # fftw is not reliably present on Windows, so packages that use it drop
       # the feature there. This only matters if something still pulls fftw-sys.
