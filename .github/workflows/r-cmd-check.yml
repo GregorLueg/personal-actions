@@ -192,6 +192,9 @@ jobs:
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
+          # Stable pak (0.11.1) does not know the windows.binary.clang-aarch64
+          # pkgType, so it resolves everything as source. pak devel does.
+          pak-version: ${{ matrix.config.os == 'windows-11-arm' && 'devel' || 'stable' }}
           extra-packages: |
             any::rcmdcheck
             any::rmarkdown
