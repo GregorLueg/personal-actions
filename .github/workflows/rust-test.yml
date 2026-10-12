@@ -52,10 +52,17 @@ on:
 # Debug info is the bulk of target/ and the cache restore is the dominant cost
 # on Windows. Set here rather than in Cargo.toml so local builds keep their
 # backtraces.
+#
+# Release LTO is dropped for the same reason: `cargo test --release` links
+# every example and test target as its own binary, and a crate with
+# `lto = true, codegen-units = 1` pays a single-threaded fat LTO per binary.
+# Tests want optimised code, not the last few percent.
 env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_PROFILE_RELEASE_LTO: false
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: 10
 
