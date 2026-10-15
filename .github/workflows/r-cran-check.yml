@@ -1,0 +1,198 @@
+name: CRAN check
+
+on:
+  workflow_call:
+    inputs:
+      vendor-script:
+        description: >-
+          Script, relative to the package root, that writes
+          src/rust/vendor.tar.xz. Empty for a package without Rust.
+        type: string
+        default: tools/vendor.sh
+      msrv:
+        description: >-
+          Extra Linux lane on this rustc, e.g. 1.90.0. Should match the
+          rustc floor in SystemRequirements. The CRAN Linux machines use the
+          distro rustc, which lags stable. Empty skips the lane.
+        type: string
+        default: ''
+      max-tarball-mb:
+        description: >-
+          Fail the build above this size. CRAN asks for 10 MB unless you
+          request more at submission.
+        type: number
+        default: 10
+      extra-sysdeps:
+        description: Extra apt packages, space separated.
+        type: string
+        default: ''
+
+# Checks the tarball you would actually upload: vendored crates, vignettes
+# built, NOT_CRAN unset, --as-cran, release and devel. Deliberately no sccache
+# and none of the LTO overrides r-cmd-check.yml sets, so the install log and
+# timings are what CRAN sees.
+jobs:
+  build:
+    name: Build tarball
+    runs-on: ubuntu-latest
+    outputs:
+      tarball: ${{ steps.build.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.vendor-script != ''
+
+      - name: Install system dependencies
+        if: inputs.extra-sysdeps != ''
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086  # word splitting is the point here
+          sudo apt-get install -y ${{ inputs.extra-sysdeps }}
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::knitr, any::rmarkdown, any::quarto
+          needs: check
+
+      - name: Vendor crates
+        if: inputs.vendor-script != ''
+        run: |
+          cargo install cargo-vendor-filterer --locked
+          sh '${{ inputs.vendor-script }}'
+
+      - name: R CMD build
+        id: build
+        run: |
+          R CMD build .
+          tarball=$(ls ./*.tar.gz)
+          echo "tarball=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+          bytes=$(stat -c %s "$tarball")
+          limit=$(( ${{ inputs.max-tarball-mb }} * 1000 * 1000 ))
+          echo "::notice::$(basename "$tarball") is $(( bytes / 1000 )) kB"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::error::tarball is over ${{ inputs.max-tarball-mb }} MB"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cran-tarball
+          path: ${{ steps.build.outputs.tarball }}
+
+  matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.build.outputs.config }}
+    steps:
+      - id: build
+        run: |
+          cfg='[
+            {"os": "ubuntu-latest", "r": "release", "rust": "stable"},
+            {"os": "ubuntu-latest", "r": "devel", "rust": "stable"},
+            {"os": "macOS-latest", "r": "release", "rust": "stable"},
+            {"os": "windows-latest", "r": "release", "rust": "stable"},
+            {"os": "windows-latest", "r": "devel", "rust": "stable"}
+          ]'
+          if [ -n '${{ inputs.msrv }}' ]; then
+            cfg=$(jq -c --arg v '${{ inputs.msrv }}' \
+              '. + [{os: "ubuntu-latest", r: "release", rust: $v}]' <<< "$cfg")
+          fi
+          echo "config=$(jq -c . <<< "$cfg")" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: [build, matrix]
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }}, rustc ${{ matrix.config.rust }})
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(needs.matrix.outputs.config) }}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      _R_CHECK_FORCE_SUGGESTS_: true
+
+    steps:
+      # Checkout only so setup-r-dependencies can read DESCRIPTION. The check
+      # itself runs on the tarball.
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cran-tarball
+          path: tarball
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          use-public-rspm: true
+
+      # extendr links against the gnu ABI on Windows, not msvc.
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.vendor-script != ''
+        with:
+          toolchain: >-
+            ${{ matrix.config.rust }}${{ runner.os == 'Windows' && '-x86_64-pc-windows-gnu' || '' }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux' && inputs.extra-sysdeps != ''
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086  # word splitting is the point here
+          sudo apt-get install -y ${{ inputs.extra-sysdeps }}
+
+      # CRAN builds the PDF manual, and Rd problems only show up there. Linux
+      # only: once is enough and tinytex is slow on the other runners.
+      - uses: r-lib/actions/setup-tinytex@v2
+        if: runner.os == 'Linux'
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          needs: check
+
+      # NOT_CRAN must stay unset, or tools/config.R drops --offline and the
+      # vendored path is never exercised.
+      - name: R CMD check --as-cran
+        shell: bash
+        env:
+          _R_CHECK_CRAN_INCOMING_REMOTE_: false
+        run: |
+          unset NOT_CRAN
+          manual='${{ runner.os != 'Linux' && '--no-manual' || '' }}'
+          # shellcheck disable=SC2086  # empty $manual must vanish
+          R CMD check --as-cran $manual 'tarball/${{ needs.build.outputs.tarball }}'
+
+      - name: Assert offline vendored build
+        if: inputs.vendor-script != ''
+        shell: bash
+        run: |
+          pkg='${{ needs.build.outputs.tarball }}'
+          log="${pkg%%_*}.Rcheck/00install.out"
+          grep -q "Using offline vendor tarball" "$log" \
+            || { echo "::error::install did not use vendor.tar.xz"; exit 1; }
+
+      - name: Fail on WARNING or ERROR
+        shell: bash
+        run: |
+          pkg='${{ needs.build.outputs.tarball }}'
+          log="${pkg%%_*}.Rcheck/00check.log"
+          tail -n 5 "$log"
+          if grep -qE "^Status:.*(WARNING|ERROR)" "$log"; then exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-${{ matrix.config.os }}-${{ matrix.config.r }}-${{ matrix.config.rust }}
+          path: '*.Rcheck/00*'
