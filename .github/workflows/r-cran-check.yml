@@ -188,6 +188,10 @@ jobs:
           export TEXINPUTS=".:$rhome/share/texmf/tex/latex:"
           pdflatex -interaction=nonstopmode "${pkg%%_*}-manual.tex" > /dev/null || true
           grep -n -A8 '^!' "${pkg%%_*}-manual.log" || tail -n 40 "${pkg%%_*}-manual.log"
+          # pdflatex can succeed where Rd2pdf still fails, so rerun that too
+          echo "::group::R CMD Rd2pdf"
+          R CMD Rd2pdf --no-preview --batch --force -o /tmp/manual.pdf "${pkg%%_*}" || true
+          echo "::endgroup::"
 
       - name: Assert offline vendored build
         if: inputs.vendor-script != ''
