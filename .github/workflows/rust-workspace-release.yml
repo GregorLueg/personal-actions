@@ -1,0 +1,200 @@
+name: Rust workspace release
+
+# The workspace sibling of `rust-release.yml`. Every publishable member shares
+# one version (`[workspace.package] version`), so there is one tag, one GitHub
+# release and one `cargo publish` per member, in dependency order.
+#
+# Each member is checked against crates.io on its own before publishing, so a
+# run that dies halfway (a rate limit on new crate names, a network error)
+# resumes where it stopped when re-run.
+
+on:
+  workflow_call:
+    inputs:
+      publish-args:
+        description: >-
+          Args appended to every `cargo publish -p <member>`, e.g. "--no-verify".
+        type: string
+        default: ''
+      needs-r:
+        description: >-
+          A member links against R via extendr, so the publish verification
+          build needs R and the shared libR present.
+        type: boolean
+        default: false
+      python-owns-latest:
+        description: >-
+          Leave the repository's "Latest" release to the Python bindings. See
+          rust-release.yml.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 90
+
+jobs:
+  release:
+    name: Check version and release
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Publishable members in dependency order, and their shared version.
+      # `publish = false` shows up as an empty `publish` list in the metadata.
+      - name: Read members and version
+        id: ws
+        run: |
+          cargo metadata --no-deps --format-version 1 > meta.json
+          version=$(jq -r '[.packages[] | select(.publish != []) | .version] | unique | if length == 1 then .[0] else error("members disagree on version: \(.)") end' meta.json)
+          # Topological order over path dependencies between members. Dev
+          # dependencies count too: `cargo publish` verification resolves them,
+          # so a member cannot go up before a sibling it only tests against.
+          order=$(jq -r '
+            [.packages[] | select(.publish != [])] as $p
+            | ($p | map(.name)) as $names
+            | ($p | map({key: .name, value: [.dependencies[] | select(.path != null) | .name | select(. as $d | $names | any(. == $d))]}) | from_entries) as $deps
+            | def visit($n; $seen):
+                if ($seen | any(. == $n)) then $seen
+                else (reduce $deps[$n][] as $d ($seen; visit($d; .))) + [$n]
+                end;
+              reduce $names[] as $n ([]; visit($n; .))
+            | .[]' meta.json)
+          rm meta.json
+          if [ -z "$version" ] || [ -z "$order" ]; then
+            echo "::error::could not read members or version"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "order<<EOF"
+            echo "$order"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "publish order:"
+          echo "$order"
+
+      - name: Check whether the tag exists
+        id: tag
+        env:
+          TAG: ${{ steps.ws.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same contract as rust-release.yml: 200 means published (yanked counts),
+      # 404 means not, anything else fails the job rather than being guessed at.
+      - name: Check which members are on crates.io
+        id: crate
+        env:
+          ORDER: ${{ steps.ws.outputs.order }}
+          VERSION: ${{ steps.ws.outputs.version }}
+        run: |
+          missing=''
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            url="https://crates.io/api/v1/crates/$name/$VERSION"
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: personal-actions (github.com/GregorLueg/personal-actions)' \
+              --retry 3 --retry-delay 5 --retry-connrefused "$url")
+            case "$code" in
+              200) echo "$name $VERSION is already on crates.io" ;;
+              404) missing="$missing $name" ;;
+              *)
+                echo "::error::crates.io returned $code for $url"
+                exit 1
+                ;;
+            esac
+          done <<< "$ORDER"
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push the tag
+        id: push-tag
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.ws.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create the GitHub release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ws.outputs.tag }}
+          name: Release ${{ steps.ws.outputs.tag }}
+          generate_release_notes: true
+          make_latest: ${{ inputs.python-owns-latest && 'false' || 'legacy' }}
+
+      - name: Install R
+        id: setup-r
+        if: steps.crate.outputs.missing != '' && inputs.needs-r
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install R shared library
+        if: steps.crate.outputs.missing != '' && inputs.needs-r
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y r-base-dev
+          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      # Recovery path: publish what the release tag points at, not HEAD.
+      - name: Check out the existing tag before publishing
+        if: steps.tag.outputs.exists == 'true' && steps.crate.outputs.missing != ''
+        env:
+          TAG: ${{ steps.ws.outputs.tag }}
+        run: git checkout --detach "$TAG"
+
+      # `cargo publish` waits until the crate is in the index before
+      # returning, so the next member in the order can resolve it.
+      - name: Publish to crates.io
+        id: publish
+        if: steps.crate.outputs.missing != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          LD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
+          ORDER: ${{ steps.ws.outputs.order }}
+          MISSING: ${{ steps.crate.outputs.missing }}
+        run: |
+          published=''
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            [[ " $MISSING " == *" $name "* ]] || continue
+            echo "::group::cargo publish -p $name"
+            # shellcheck disable=SC2086  # word splitting is the point here
+            cargo publish -p "$name" ${{ inputs.publish-args }}
+            echo "::endgroup::"
+            published="$published $name"
+          done <<< "$ORDER"
+          echo "published=${published# }" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always() && steps.ws.outputs.version != ''
+        env:
+          SUMMARY: |
+            ### workspace ${{ steps.ws.outputs.version }}
+
+            - tag `${{ steps.ws.outputs.tag }}`: ${{ steps.tag.outputs.exists == 'true' && 'already existed' || steps.push-tag.outcome }}
+            - missing before this run: ${{ steps.crate.outputs.missing || 'none' }}
+            - published by this run: ${{ steps.publish.outputs.published || 'none' }} (${{ steps.publish.outcome }})
+        run: echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
