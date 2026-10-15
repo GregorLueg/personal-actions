@@ -158,6 +158,12 @@ jobs:
       - uses: r-lib/actions/setup-tinytex@v2
         if: runner.os == 'Linux'
 
+      # TinyTeX ships without makeindex. The manual check on R-devel died with
+      # "texi2dvi: makeindex: not found" while release passed.
+      - name: Install makeindex
+        if: runner.os == 'Linux'
+        run: tlmgr install makeindex
+
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           needs: check
