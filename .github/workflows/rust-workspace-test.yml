@@ -1,0 +1,284 @@
+name: Rust workspace test
+
+# The workspace sibling of `rust-test.yml`, for a repo that is a cargo
+# workspace of several crates published together. Three differences:
+#
+# - Each lane takes a list of `cargo test` runs, one per line, rather than one
+#   or two argument strings. A workspace wants `-p <crate>` runs at each
+#   crate's own feature set.
+# - R is its own lane. Only the crate that links libR needs it, so the CPU
+#   lane runs without R and Windows stays on msvc there.
+# - A check job builds every member on its own at its minimal features.
+#   Feature unification makes a workspace-wide build enable features a member
+#   forgot to declare, so a member can be green in the workspace and broken
+#   for a consumer that depends on it alone.
+
+on:
+  workflow_call:
+    inputs:
+      cpu-runs:
+        description: >-
+          `cargo test` runs on the CPU lane, one per line, e.g.
+          "-p bixverse-core". No R on this lane. Empty skips the lane.
+        type: string
+        default: ''
+      windows-cpu-runs:
+        description: Overrides cpu-runs on Windows.
+        type: string
+        default: ''
+      r-runs:
+        description: >-
+          `cargo test` runs on the R lane, one per line. Installs R and the
+          shared libR, and uses the gnu ABI on Windows. Empty skips the lane.
+        type: string
+        default: ''
+      gpu-runs:
+        description: >-
+          `cargo test` runs on the GPU lane (Linux lavapipe and macOS), one per
+          line. Empty skips the lane.
+        type: string
+        default: ''
+      check-members:
+        description: >-
+          Run `cargo check -p <member> --no-default-features` for every
+          workspace member on its own. There is no R on this job: extendr's
+          build script looks for it even under `cargo check`, so put a member
+          that links libR in check-exclude and cover it on the R lane.
+        type: boolean
+        default: true
+      check-exclude:
+        description: Workspace members to leave out of the check job, space separated.
+        type: string
+        default: ''
+      windows:
+        description: Include windows-latest in the CPU and R matrices.
+        type: boolean
+        default: true
+      gpu-malloc-check:
+        description: >-
+          Set MALLOC_CHECK_=3 on the Linux GPU job. Under lavapipe a kernel
+          writing past a shared-memory allocation is a real heap overflow, and
+          this aborts at the next free instead of letting it pass silently.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 45
+
+# See rust-test.yml for why debug info and release LTO are dropped.
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_PROFILE_RELEASE_LTO: false
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      cpu: ${{ steps.build.outputs.cpu }}
+    steps:
+      - id: build
+        run: |
+          cfg='["ubuntu-latest","macos-latest"]'
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cfg=$(jq -c '. + ["windows-latest"]' <<< "$cfg")
+          fi
+          echo "cpu=$cfg" >> "$GITHUB_OUTPUT"
+
+  check:
+    if: inputs.check-members
+    name: Check members alone
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check
+          cache-on-failure: true
+      - name: cargo check each member
+        env:
+          EXCLUDE: ${{ inputs.check-exclude }}
+        run: |
+          members=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          failed=''
+          for m in $members; do
+            if [[ " $EXCLUDE " == *" $m "* ]]; then
+              echo "skip $m"
+              continue
+            fi
+            echo "::group::$m"
+            if ! cargo check -p "$m" --no-default-features --all-targets; then
+              failed="$failed $m"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::failed on its own:$failed"
+            exit 1
+          fi
+
+  test:
+    if: inputs.cpu-runs != ''
+    needs: matrix
+    name: CPU on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.cpu) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Exclude build dirs from Defender (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionProcess "cargo.exe","rustc.exe","link.exe","ld.exe"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+          cache-on-failure: true
+
+      - name: Run tests
+        shell: bash
+        env:
+          RUNS: ${{ runner.os == 'Windows' && inputs.windows-cpu-runs != '' && inputs.windows-cpu-runs || inputs.cpu-runs }}
+        run: |
+          while IFS= read -r args; do
+            [ -z "${args// }" ] && continue
+            echo "::group::cargo test $args"
+            # shellcheck disable=SC2086  # word splitting is the point here
+            cargo test $args
+            echo "::endgroup::"
+          done <<< "$RUNS"
+
+  test-r:
+    if: inputs.r-runs != ''
+    needs: matrix
+    name: R on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.cpu) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Exclude build dirs from Defender (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionProcess "cargo.exe","rustc.exe","link.exe","ld.exe"
+
+      - name: Install R
+        id: setup-r
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install R shared library (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y r-base-dev
+          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      # R on Windows is mingw-built, so extendr needs the GNU ABI.
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os != 'Windows'
+      - uses: dtolnay/rust-toolchain@master
+        if: runner.os == 'Windows'
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-r
+          cache-on-failure: true
+
+      - name: Set R_HOME (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
+
+      - name: Run tests
+        shell: bash
+        env:
+          RUNS: ${{ inputs.r-runs }}
+          LD_LIBRARY_PATH: ${{ format('{0}/lib', steps.setup-r.outputs.r-home) }}
+          DYLD_LIBRARY_PATH: ${{ format('{0}/lib', steps.setup-r.outputs.r-home) }}
+        run: |
+          while IFS= read -r args; do
+            [ -z "${args// }" ] && continue
+            echo "::group::cargo test $args"
+            # shellcheck disable=SC2086
+            cargo test $args
+            echo "::endgroup::"
+          done <<< "$RUNS"
+
+  test-gpu:
+    if: inputs.gpu-runs != ''
+    name: GPU on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-gpu
+          cache-on-failure: true
+
+      # See rust-test.yml: lavapipe, a smoke lane for the shared-memory arms.
+      - name: Install Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+
+      - name: Enable glibc heap checks (Linux)
+        if: inputs.gpu-malloc-check && runner.os == 'Linux'
+        run: echo "MALLOC_CHECK_=3" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        shell: bash
+        env:
+          RUNS: ${{ inputs.gpu-runs }}
+        run: |
+          while IFS= read -r args; do
+            [ -z "${args// }" ] && continue
+            echo "::group::cargo test $args"
+            # shellcheck disable=SC2086
+            cargo test $args
+            echo "::endgroup::"
+          done <<< "$RUNS"

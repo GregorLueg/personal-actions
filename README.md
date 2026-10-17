@@ -19,6 +19,8 @@ by the copier template in
 | `rust-test.yml` | Crate tests, CPU and GPU lanes |
 | `rust-release.yml` | Tag, release and `cargo publish`, gated on a green test |
 | `rust-binary-release.yml` | Build a CLI binary per platform and attach it to that release |
+| `rust-workspace-test.yml` | Workspace tests: per-member check, CPU, R and GPU lanes |
+| `rust-workspace-release.yml` | One tag, one `cargo publish` per member in dependency order |
 | `python-test.yml` | ruff, ty and pytest over an OS x interpreter matrix |
 | `python-release.yml` | Tag, release and `uv publish`, gated on a green test |
 | `python-maturin-test.yml` | The same, plus cargo, for a PyO3 extension |
@@ -242,6 +244,87 @@ The `timeout-minutes` default matters more here than in `rust-test.yml`. Without
 it the job inherits GitHub's 6-hour cap, and an `apt-get install r-base-dev`
 that wedges on a bad mirror will happily use all of it, which is exactly what
 broke the 0.4.5 release.
+
+### `rust-workspace-test.yml`
+
+For a repo that is a cargo workspace of crates published together, like
+`bixverse-rs` since 0.8.0. Not a superset of `rust-test.yml`, so a separate
+file rather than more inputs on that one.
+
+```yaml
+jobs:
+  test:
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@v1
+    with:
+      cpu-runs: |
+        -p bixverse-core
+        -p bixverse-sc-data --features h5
+        -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+      r-runs: |
+        -p bixverse-r --features single-cell,multi-modal
+      gpu-runs: |
+        -p bixverse-gpu
+        -p bixverse-rs --features sc-gpu,hdf5-static
+      check-exclude: bixverse-r
+    secrets: inherit
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `cpu-runs` | string | `''` | `cargo test` runs, one per line. No R on this lane, so Windows stays on msvc. Empty skips it. |
+| `windows-cpu-runs` | string | `''` | Overrides `cpu-runs` on Windows. |
+| `r-runs` | string | `''` | Same, on a lane with R and the shared libR, gnu ABI on Windows. Empty skips it. |
+| `gpu-runs` | string | `''` | Same, on the Linux lavapipe and macOS GPU lane. Empty skips it. |
+| `check-members` | boolean | `true` | `cargo check -p <member> --no-default-features --all-targets` for every member on its own. |
+| `check-exclude` | string | `''` | Members the check job skips, space separated. |
+| `windows` | boolean | `true` | Include `windows-latest` in the CPU and R matrices. |
+| `gpu-malloc-check` | boolean | `false` | As in `rust-test.yml`. |
+| `timeout-minutes` | number | `45` | |
+
+The check job is there because of feature unification. A workspace-wide build
+turns on every feature any member asks for, so a member that forgot to declare
+one compiles in the workspace and breaks for a consumer that depends on it
+alone. Checking each member by itself is the only build that sees that. It has
+no R: extendr's build script looks for R even under `cargo check`, so a member
+that links libR goes in `check-exclude` and is covered by the R lane instead.
+
+R is a lane of its own because only the member that links libR needs it. Every
+other crate tests without R, which is most of the point of splitting the R
+layer out.
+
+### `rust-workspace-release.yml`
+
+The workspace sibling of `rust-release.yml`. Every publishable member shares
+one version through `[workspace.package]`.
+
+```yaml
+jobs:
+  release:
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-release.yml@v1
+    with:
+      needs-r: true
+    secrets: inherit
+```
+
+| input | type | default | what it does |
+|---|---|---|---|
+| `publish-args` | string | `''` | Appended to every `cargo publish -p <member>`. |
+| `needs-r` | boolean | `false` | A member's publish verification build needs R. |
+| `python-owns-latest` | boolean | `false` | As in `rust-release.yml`. |
+| `timeout-minutes` | number | `90` | Each member is verified with its own build. |
+
+It reads the members and the version from `cargo metadata`, fails if members
+disagree on the version, and orders the publishable ones (`publish = false`
+is skipped) topologically over their path dependencies, dev dependencies
+included: publish verification resolves those too, so a member cannot go up
+before a sibling it only tests against.
+
+The tag and release work as in `rust-release.yml`: one `v$version` tag for the
+whole workspace. The crates.io check runs per member, so a run that dies
+halfway (a rate limit on brand-new crate names, a network error) resumes where
+it stopped on rerun, and the step summary lists what was missing and what this
+run published. The token in `CARGO_REGISTRY_TOKEN` needs the `publish-new`
+scope the first time a member name appears.
 
 ### `rust-binary-release.yml`
 
