@@ -34,7 +34,7 @@ on:
           Longest single wait on a crates.io 429 before giving up. The job
           timeout still bounds the total.
         type: number
-        default: 30
+        default: 10
       timeout-minutes:
         type: number
         default: 90
@@ -202,13 +202,13 @@ jobs:
               if [ -z "$after" ]; then
                 exit 1
               fi
-              wait=$(( $(date -d "$after" +%s) - $(date +%s) + 30 ))
+              wait=$(( $(date -d "$after" +%s) - $(date +%s) ))
               if [ "$wait" -gt $(( MAX_WAIT_MINUTES * 60 )) ]; then
                 echo "::error::crates.io rate limit on $name until $after, longer than ${MAX_WAIT_MINUTES} min; re-run after that"
                 exit 1
               fi
-              echo "::warning::crates.io rate limit on $name, sleeping ${wait}s until $after"
-              sleep "$wait"
+              echo "::warning::crates.io rate limit on $name, sleeping $(( wait + 30 ))s until $after"
+              sleep $(( wait + 30 ))
             done
             rm -f publish.log
             echo "::endgroup::"

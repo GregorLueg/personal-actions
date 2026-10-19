@@ -311,7 +311,7 @@ jobs:
 | `publish-args` | string | `''` | Appended to every `cargo publish -p <member>`. |
 | `needs-r` | boolean | `false` | A member's publish verification build needs R. |
 | `python-owns-latest` | boolean | `false` | As in `rust-release.yml`. |
-| `rate-limit-max-wait-minutes` | number | `30` | Longest single wait on a crates.io 429 before the job gives up. |
+| `rate-limit-max-wait-minutes` | number | `10` | Longest single wait on a crates.io 429 before the job gives up. |
 | `timeout-minutes` | number | `90` | Each member is verified with its own build. Bounds the 429 waits too. |
 
 It reads the members and the version from `cargo metadata`, fails if members
