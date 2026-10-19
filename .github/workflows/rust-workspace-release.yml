@@ -6,7 +6,8 @@ name: Rust workspace release
 #
 # Each member is checked against crates.io on its own before publishing, so a
 # run that dies halfway (a rate limit on new crate names, a network error)
-# resumes where it stopped when re-run.
+# resumes where it stopped when re-run. A 429 on a new crate name is waited
+# out in-run, up to `rate-limit-max-wait-minutes` per wait.
 
 on:
   workflow_call:
@@ -28,6 +29,12 @@ on:
           rust-release.yml.
         type: boolean
         default: false
+      rate-limit-max-wait-minutes:
+        description: >-
+          Longest single wait on a crates.io 429 before giving up. The job
+          timeout still bounds the total.
+        type: number
+        default: 10
       timeout-minutes:
         type: number
         default: 90
@@ -175,14 +182,35 @@ jobs:
           LD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
           ORDER: ${{ steps.ws.outputs.order }}
           MISSING: ${{ steps.crate.outputs.missing }}
+          MAX_WAIT_MINUTES: ${{ inputs.rate-limit-max-wait-minutes }}
+        shell: bash
         run: |
+          set -o pipefail
           published=''
           while IFS= read -r name; do
             [ -z "$name" ] && continue
             [[ " $MISSING " == *" $name "* ]] || continue
             echo "::group::cargo publish -p $name"
-            # shellcheck disable=SC2086  # word splitting is the point here
-            cargo publish -p "$name" ${{ inputs.publish-args }}
+            # crates.io rate-limits new crate names and says when to retry, so
+            # sleep until then instead of failing the run. Any other error fails.
+            while true; do
+              # shellcheck disable=SC2086  # word splitting is the point here
+              if cargo publish -p "$name" ${{ inputs.publish-args }} 2>&1 | tee publish.log; then
+                break
+              fi
+              after=$(grep -oP 'status 429.*try again after \K[^.]*GMT' publish.log || true)
+              if [ -z "$after" ]; then
+                exit 1
+              fi
+              wait=$(( $(date -d "$after" +%s) - $(date +%s) ))
+              if [ "$wait" -gt $(( MAX_WAIT_MINUTES * 60 )) ]; then
+                echo "::error::crates.io rate limit on $name until $after, longer than ${MAX_WAIT_MINUTES} min; re-run after that"
+                exit 1
+              fi
+              echo "::warning::crates.io rate limit on $name, sleeping $(( wait + 30 ))s until $after"
+              sleep $(( wait + 30 ))
+            done
+            rm -f publish.log
             echo "::endgroup::"
             published="$published $name"
           done <<< "$ORDER"
