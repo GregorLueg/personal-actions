@@ -196,13 +196,14 @@ jobs:
         id: setup-r
         uses: r-lib/actions/setup-r@v2
 
-      - name: Install R shared library (Linux)
+      # Link against setup-r's own libR. apt's r-base-dev is a different R
+      # version, and mixing its libR with setup-r's base packages breaks.
+      - name: Point linker at setup-r's libR (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y r-base-dev
-          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          rlib="$(R RHOME)/lib"
+          echo "LIBRARY_PATH=$rlib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$rlib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       # R on Windows is mingw-built, so extendr needs the GNU ABI.
       - uses: dtolnay/rust-toolchain@stable
@@ -226,8 +227,6 @@ jobs:
         shell: bash
         env:
           RUNS: ${{ inputs.r-runs }}
-          LD_LIBRARY_PATH: ${{ format('{0}/lib', steps.setup-r.outputs.r-home) }}
-          DYLD_LIBRARY_PATH: ${{ format('{0}/lib', steps.setup-r.outputs.r-home) }}
         run: |
           while IFS= read -r args; do
             [ -z "${args// }" ] && continue

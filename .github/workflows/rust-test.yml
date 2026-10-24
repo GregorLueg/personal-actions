@@ -110,13 +110,14 @@ jobs:
         if: inputs.needs-r
         uses: r-lib/actions/setup-r@v2
 
-      - name: Install R shared library (Linux)
+      # Link against setup-r's own libR. apt's r-base-dev is a different R
+      # version, and mixing its libR with setup-r's base packages breaks.
+      - name: Point linker at setup-r's libR (Linux)
         if: inputs.needs-r && runner.os == 'Linux'
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y r-base-dev
-          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          rlib="$(R RHOME)/lib"
+          echo "LIBRARY_PATH=$rlib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$rlib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       # R on Windows is mingw-built, so extendr needs the GNU ABI. Install it
       # directly instead of pulling MSVC first and switching afterwards.
@@ -139,9 +140,6 @@ jobs:
 
       - name: Run tests
         shell: bash
-        env:
-          LD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
-          DYLD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
         run: |
           args='${{ inputs.cpu-args }}'
           if [ "$RUNNER_OS" = 'Windows' ] && [ -n '${{ inputs.windows-cpu-args }}' ]; then
@@ -174,13 +172,14 @@ jobs:
         if: inputs.needs-r
         uses: r-lib/actions/setup-r@v2
 
-      - name: Install R shared library (Linux)
+      # Link against setup-r's own libR. apt's r-base-dev is a different R
+      # version, and mixing its libR with setup-r's base packages breaks.
+      - name: Point linker at setup-r's libR (Linux)
         if: inputs.needs-r && runner.os == 'Linux'
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y r-base-dev
-          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          rlib="$(R RHOME)/lib"
+          echo "LIBRARY_PATH=$rlib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$rlib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -208,8 +207,5 @@ jobs:
 
       - name: Run tests
         shell: bash
-        env:
-          LD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
-          DYLD_LIBRARY_PATH: ${{ inputs.needs-r && format('{0}/lib', steps.setup-r.outputs.r-home) || '' }}
         # shellcheck disable=SC2086
         run: cargo test ${{ inputs.gpu-args }}
