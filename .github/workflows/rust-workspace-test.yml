@@ -221,7 +221,7 @@ jobs:
       - name: Set R_HOME (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
+        run: echo "R_HOME=$(Rscript -e 'cat(R.home())')" >> $env:GITHUB_ENV
 
       - name: Run tests
         shell: bash
