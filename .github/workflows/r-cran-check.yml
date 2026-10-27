@@ -160,9 +160,15 @@ jobs:
 
       # TinyTeX ships without makeindex. The manual check on R-devel died with
       # "texi2dvi: makeindex: not found" while release passed.
+      #
+      # Update tlmgr first: once CTAN ships a newer tlmgr than the TinyTeX
+      # bundle, every install refuses with "tlmgr itself needs to be updated"
+      # and exits 255, failing both Linux lanes before the check starts.
       - name: Install makeindex
         if: runner.os == 'Linux'
-        run: tlmgr install makeindex
+        run: |
+          tlmgr update --self
+          tlmgr install makeindex
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
