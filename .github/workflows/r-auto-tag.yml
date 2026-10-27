@@ -2,6 +2,13 @@ name: Auto tag
 
 on:
   workflow_call:
+    outputs:
+      created:
+        description: "'true' when this run created the tag and release."
+        value: ${{ jobs.tag.outputs.created }}
+      tag:
+        description: The tag read from DESCRIPTION, e.g. v0.5.0.
+        value: ${{ jobs.tag.outputs.tag }}
 
 # Reads Version from DESCRIPTION, tags it if that tag does not already exist and
 # cuts a release.
@@ -23,6 +30,9 @@ jobs:
        github.event.workflow_run.head_branch == github.event.repository.default_branch)
     permissions:
       contents: write
+    outputs:
+      created: ${{ steps.check.outputs.exists == 'false' }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       # workflow_run checks out the default branch HEAD unless told otherwise.
       # Pin to the sha that actually passed, so a push landing mid-run cannot
