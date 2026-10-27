@@ -1,0 +1,129 @@
+name: Conda release
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Channel URL to publish to and resolve sibling packages from, e.g. https://prefix.dev/gregorlueg/bixverse
+        type: string
+        required: true
+      ref:
+        description: Git ref to build, normally the release tag. Empty builds the triggering sha.
+        type: string
+        default: ''
+      r-versions:
+        description: r_base variants, comma separated. Follows conda-forge's pinning.
+        type: string
+        default: '4.4,4.5'
+      extra-channels:
+        description: Further channels to resolve dependencies from, space separated, e.g. bioconda.
+        type: string
+        default: ''
+      publish:
+        description: Upload the packages. Off for a dry run.
+        type: boolean
+        default: true
+      rattler-build-version:
+        type: string
+        default: 'v0.79.0'
+
+# Builds a conda package from the R package at `ref` and publishes it with
+# trusted publishing, so no API key is stored anywhere.
+#
+# The recipe is not committed. devforge::conda_recipe() generates it from the
+# DESCRIPTION at `ref`, which is what makes backfilling an old tag a matter of
+# dispatching with that tag.
+#
+# Callers trigger this through workflow_dispatch, not a release or tag event:
+# releases and tags pushed with GITHUB_TOKEN start no workflows, dispatches do.
+# Register the caller's workflow file as the trusted publisher on the channel.
+#
+# Windows is skipped: conda's R on Windows is built with m2w64, and making the
+# extendr gnu toolchain link against it is not worth the fight.
+jobs:
+  build:
+    name: Build (${{ matrix.subdir }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            subdir: linux-64
+          - os: macos-latest
+            subdir: osx-arm64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install devforge
+        run: |
+          install.packages(
+            "devforge",
+            repos = c(
+              "https://gregorlueg.r-universe.dev",
+              "https://cloud.r-project.org"
+            )
+          )
+        shell: Rscript {0}
+
+      # Outside the checkout: the recipe builds from the checkout as its source.
+      - name: Generate the recipe
+        id: recipe
+        run: |
+          recipe <- devforge::conda_recipe(
+            ".",
+            dir = file.path(Sys.getenv("RUNNER_TEMP"), "recipe")
+          )
+          noarch <- any(grepl("^  noarch:", readLines(recipe)))
+          cat(
+            sprintf("path=%s\nnoarch=%s\n", recipe, tolower(noarch)),
+            file = Sys.getenv("GITHUB_OUTPUT"),
+            append = TRUE
+          )
+        shell: Rscript {0}
+
+      - uses: prefix-dev/rattler-build-action@v0.2.39
+        with:
+          rattler-build-version: ${{ inputs.rattler-build-version }}
+          setup-only: true
+
+      # A pure R package is noarch, so one runner builds it for everyone.
+      # --skip-existing=all checks the channel too, so re-dispatching a tag that
+      # is already published builds nothing.
+      - name: Build
+        if: steps.recipe.outputs.noarch != 'true' || matrix.subdir == 'linux-64'
+        run: |
+          args=(-c conda-forge -c "${{ inputs.channel }}")
+          for c in ${{ inputs.extra-channels }}; do
+            args+=(-c "$c")
+          done
+          if [ "${{ steps.recipe.outputs.noarch }}" != "true" ]; then
+            args+=(--variant "r_base=${{ inputs.r-versions }}")
+          fi
+          rattler-build build \
+            --recipe "${{ steps.recipe.outputs.path }}" \
+            "${args[@]}" \
+            --skip-existing=all \
+            --output-dir "$RUNNER_TEMP/out"
+
+      - name: Publish
+        if: >-
+          inputs.publish &&
+          (steps.recipe.outputs.noarch != 'true' || matrix.subdir == 'linux-64')
+        run: |
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/out/${{ matrix.subdir }}/*.conda "$RUNNER_TEMP"/out/noarch/*.conda)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "Nothing built, everything already on the channel"
+            exit 0
+          fi
+          rattler-build publish "${files[@]}" --to "${{ inputs.channel }}"
