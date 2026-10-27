@@ -14,6 +14,7 @@ by the copier template in
 | workflow | for |
 |---|---|
 | [`r-cmd-check.yml`](docs/r-cmd-check.md) | R CMD check, with or without a Rust crate |
+| [`r-cran-check.yml`](docs/r-cran-check.md) | `--as-cran` on the vendored tarball, release and devel, before a submission |
 | [`r-pkgdown.yml`](docs/r-pkgdown.md) | Build the pkgdown site, deploy on non-PR events |
 | [`r-auto-tag.yml`](docs/r-auto-tag.md) | Tag and release on a version bump, gated on a green check |
 | [`r-conda-release.yml`](docs/r-conda-release.md) | Build a conda package with rattler-build and publish it to a prefix.dev channel |
