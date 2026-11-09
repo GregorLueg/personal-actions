@@ -100,7 +100,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Must run before R CMD check. The check leaves a tarball and a check/
       # directory behind, and copier refuses to operate on a dirty tree, which
@@ -148,7 +148,7 @@ jobs:
         id: sccache
         if: inputs.rust
         continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cargo env
         if: inputs.rust

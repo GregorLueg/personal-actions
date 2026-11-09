@@ -48,7 +48,7 @@ jobs:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: r-lib/actions/setup-pandoc@v2
 
@@ -71,7 +71,7 @@ jobs:
         id: sccache
         if: inputs.rust
         continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cargo env
         if: inputs.rust
@@ -135,7 +135,7 @@ jobs:
       # docs to gh-pages, which is what bixverse has been doing.
       - name: Deploy to GitHub pages
         if: github.event_name != 'pull_request'
-        uses: JamesIves/github-pages-deploy-action@v4.7.3
+        uses: JamesIves/github-pages-deploy-action@v4.9.0
         with:
           clean: false
           branch: gh-pages

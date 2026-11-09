@@ -38,7 +38,7 @@ jobs:
     outputs:
       tarball: ${{ steps.build.outputs.tarball }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: r-lib/actions/setup-pandoc@v2
 
@@ -83,7 +83,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cran-tarball
           path: ${{ steps.build.outputs.tarball }}
@@ -125,9 +125,9 @@ jobs:
     steps:
       # Checkout only so setup-r-dependencies can read DESCRIPTION. The check
       # itself runs on the tarball.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cran-tarball
           path: tarball
@@ -222,7 +222,7 @@ jobs:
           tail -n 5 "$log"
           if grep -qE "^Status:.*(WARNING|ERROR)" "$log"; then exit 1; fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: check-${{ matrix.config.os }}-${{ matrix.config.r }}-${{ matrix.config.rust }}

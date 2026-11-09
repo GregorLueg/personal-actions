@@ -37,7 +37,7 @@ jobs:
       # workflow_run checks out the default branch HEAD unless told otherwise.
       # Pin to the sha that actually passed, so a push landing mid-run cannot
       # get itself released off the back of someone else's green check.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
@@ -76,7 +76,7 @@ jobs:
       # an empty release body.
       - name: Create the GitHub release
         if: steps.check.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}

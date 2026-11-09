@@ -41,7 +41,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       build: ${{ steps.assets.outputs.build }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           persist-credentials: false
@@ -107,7 +107,7 @@ jobs:
     steps:
       # Build the tag, not the triggering ref, so a manual re-run of an older
       # release ships that release's code.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.tag }}
           persist-credentials: false
@@ -139,7 +139,7 @@ jobs:
           Compress-Archive -Path target/${{ matrix.target }}/release/${{ inputs.binary }}.exe `
             -DestinationPath ${{ inputs.binary }}-${{ matrix.target }}.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.binary }}-${{ matrix.target }}
           path: ${{ inputs.binary }}-${{ matrix.target }}.${{ matrix.archive }}
@@ -153,7 +153,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: assets
           merge-multiple: true
