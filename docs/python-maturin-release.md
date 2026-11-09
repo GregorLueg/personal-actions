@@ -43,7 +43,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
@@ -92,7 +92,7 @@ check out the release tag once there is one, so what ships is what the tag point
 at even if `main` has moved on.
 
 Wheels come from a `PyO3/maturin-action@v1` matrix: manylinux on
-`ubuntu-latest`, `macos-14` for arm64 and `macos-15-intel` for x86_64, plus an
+`ubuntu-latest`, `macos-15` for arm64 and `macos-15-intel` for x86_64, plus an
 optional sdist. abi3 means one wheel per platform covers every interpreter, so
 the matrix is platforms only.
 

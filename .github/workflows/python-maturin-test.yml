@@ -140,7 +140,7 @@ jobs:
       run:
         working-directory: ${{ inputs.working-directory }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         if: inputs.rust-lint
@@ -156,7 +156,7 @@ jobs:
           key: lint
           cache-on-failure: true
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
 
@@ -215,7 +215,7 @@ jobs:
       run:
         working-directory: ${{ inputs.working-directory }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Defender scans every file cargo and the cache extractor touch, which is
       # a large multiplier on an IO-bound job. Must come before the cache step.
@@ -235,7 +235,7 @@ jobs:
           key: ${{ matrix.os }}-py${{ matrix.python }}
           cache-on-failure: true
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
@@ -276,7 +276,7 @@ jobs:
       run:
         working-directory: ${{ inputs.working-directory }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -288,7 +288,7 @@ jobs:
           key: reduced
           cache-on-failure: true
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
 

@@ -131,7 +131,7 @@ jobs:
       ref: ${{ steps.ref.outputs.ref }}
       should-build: ${{ steps.pypi.outputs.published != 'true' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
@@ -234,7 +234,7 @@ jobs:
 
       - name: Create the GitHub release
         if: inputs.tag && steps.tag.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.pkg.outputs.tag }}
           name: Release ${{ steps.pkg.outputs.tag }}
@@ -275,7 +275,7 @@ jobs:
             target: ${{ inputs.linux-target }}
             manylinux: ${{ inputs.manylinux }}
           - name: macos-arm64
-            runner: macos-14
+            runner: macos-15
             target: aarch64
             manylinux: auto
           - name: macos-x86_64
@@ -283,7 +283,7 @@ jobs:
             target: x86_64
             manylinux: auto
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.version.outputs.ref }}
@@ -297,7 +297,7 @@ jobs:
           args: --release --out dist ${{ inputs.maturin-args }}
           sccache: true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.name }}
           path: ${{ inputs.working-directory }}/dist/*.whl
@@ -312,7 +312,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.version.outputs.ref }}
@@ -323,7 +323,7 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           args: --out dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-sdist
           path: ${{ inputs.working-directory }}/dist/*.tar.gz

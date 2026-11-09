@@ -52,7 +52,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
@@ -145,7 +145,7 @@ jobs:
 
       - name: Create the GitHub release
         if: steps.tag.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ws.outputs.tag }}
           name: Release ${{ steps.ws.outputs.tag }}

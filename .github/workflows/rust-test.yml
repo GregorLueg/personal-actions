@@ -93,7 +93,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.matrix.outputs.cpu) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Defender scans every file cargo and the cache extractor touch, which is
       # a large multiplier on an IO-bound job. Must come before the cache step.
@@ -165,7 +165,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install R
         id: setup-r
