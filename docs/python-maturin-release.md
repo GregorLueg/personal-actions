@@ -77,9 +77,19 @@ in if it uses one.
 
 **The version comes from two files.** The distribution name is `name` in
 `[project]` of `pyproject.toml` and is not the crate name (`ann-search` against
-`ann-search-py`). The version is `version` in `[package]` of `Cargo.toml`,
-because a maturin project declares `dynamic = ["version"]` and maturin reads it
-from there. Both reads are section aware.
+`ann-search-py`). The version is the crate's, because a maturin project declares
+`dynamic = ["version"]`. It comes from `cargo metadata` on the crate that
+`[tool.maturin] manifest-path` names (`Cargo.toml` when unset), so a wheel crate
+inside a cargo workspace with `version.workspace = true` works too.
+
+**Several wheels from one repo.** Call the workflow once per `pyproject.toml`,
+each with its own `working-directory`. Artefacts are named
+`dist-<distribution>-<platform>`, so the calls never collide and one publish job
+downloading `dist-*` uploads all of them. Wheels sharing one version share one
+tag: let one call tag and pass `tag: false` to the others. They still build the
+tag once it exists, and the triggering commit (which the tag points at) before.
+Gate the publish job on any call's `should-build`, and remember each new
+distribution needs its own trusted publisher on PyPI.
 
 **`tag-prefix` defaults to `py-v` rather than `v`.** The bindings usually sit
 inside the crate's own repo, where `rust-release.yml` already owns `v$version`
