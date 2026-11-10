@@ -88,7 +88,7 @@ on:
         description: Distribution name from `[project]` in pyproject.toml.
         value: ${{ jobs.version.outputs.name }}
       version:
-        description: Version from `[package]` in Cargo.toml.
+        description: Version of the crate maturin builds, as cargo resolves it.
         value: ${{ jobs.version.outputs.version }}
       tag:
         description: The release tag, prefix included.
@@ -136,23 +136,28 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
-      # Two files, not one. The distribution name lives in `[project]` in
-      # pyproject.toml and is not the crate name; the version lives in
-      # `[package]` in Cargo.toml, because maturin projects declare
-      # `dynamic = ["version"]` and read it from there. Both reads are section
-      # aware, so a `[tool.*]` or `[dependencies]` table cannot shadow them.
+      # The distribution name lives in `[project]` in pyproject.toml and is not
+      # the crate name. The version is the crate's, because maturin projects
+      # declare `dynamic = ["version"]`. Asking cargo for it, rather than
+      # grepping `[package]`, follows `[tool.maturin] manifest-path` and
+      # resolves `version.workspace = true`, so a wheel crate inside a cargo
+      # workspace reads the same as a standalone one.
       - name: Read the name and version
         id: pkg
         working-directory: ${{ inputs.working-directory }}
         run: |
+          set -euo pipefail
           name=$(awk -F'"' '/^\[/{s=$0} s=="[project]" && /^name *=/{print $2; exit}' pyproject.toml)
-          version=$(awk -F'"' '/^\[/{s=$0} s=="[package]" && /^version *=/{print $2; exit}' Cargo.toml)
+          manifest=$(awk -F'"' '/^\[/{s=$0} s=="[tool.maturin]" && /^manifest-path *=/{print $2; exit}' pyproject.toml)
+          manifest=$(realpath "${manifest:-Cargo.toml}")
+          version=$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
+            | jq -r --arg m "$manifest" '.packages[] | select(.manifest_path == $m) | .version')
           if [ -z "$name" ]; then
             echo "::error::could not read name from [project] in pyproject.toml"
             exit 1
           fi
           if [ -z "$version" ]; then
-            echo "::error::could not read version from [package] in Cargo.toml"
+            echo "::error::could not read the version of the crate at $manifest"
             exit 1
           fi
           {
@@ -299,7 +304,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: dist-${{ matrix.name }}
+          name: dist-${{ needs.version.outputs.name }}-${{ matrix.name }}
           path: ${{ inputs.working-directory }}/dist/*.whl
           if-no-files-found: error
 
@@ -325,7 +330,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: dist-sdist
+          name: dist-${{ needs.version.outputs.name }}-sdist
           path: ${{ inputs.working-directory }}/dist/*.tar.gz
           if-no-files-found: error
 
