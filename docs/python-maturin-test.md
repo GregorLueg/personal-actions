@@ -28,10 +28,11 @@ jobs:
 |---|---|---|---|
 | `working-directory` | string | `python` | Where `Cargo.toml` and `pyproject.toml` live. |
 | `package` | string | `''` | Import name, for `ty check`. Defaults to the directory's basename, which is wrong whenever that is `python`. |
-| `python-versions` | string | `'["3.10","3.13"]'` | JSON array. |
+| `python-versions` | string | `'["3.10","3.13"]'` | JSON array. Tested in turn inside one job per OS. |
 | `macos` | boolean | `true` | |
 | `windows` | boolean | `false` | |
 | `maturin-args` | string | `--release` | Appended to `maturin develop`. |
+| `cargo-test-args` | string | `--release` | Appended to `cargo test`, also on the reduced lane. Keep the profile in step with `maturin-args`. |
 | `test-args` | string | `tests -q` | Appended to `pytest`. |
 | `install-args` | string | `--all-extras` | Args for `uv pip install -r pyproject.toml`. |
 | `extra-deps` | string | `''` | Packages on top of the manifest, space separated. Test-only deps that do not belong in an extra. |
@@ -41,9 +42,17 @@ jobs:
 | `cpu-only-args` | string | `''` | A second, feature-reduced lane. **Empty skips it.** |
 | `timeout-minutes` | number | `30` | |
 
-The Python matrix defaults to the **ends** of the supported range rather than
+The Python versions default to the **ends** of the supported range rather than
 every version in it. With `abi3-py310` one wheel covers 3.10 through 3.14, so
 testing the middle proves nothing the ends don't.
+
+There is one test job per OS, not one per OS and version. Every abi3 interpreter
+links the same Rust, so the job builds the tree once, then gives each version
+its own venv, `maturin develop` and `pytest`. A later version recompiles only
+pyo3 and the bindings crate. `cargo test` runs on the same profile as
+`maturin develop` so the dependency tree compiles once, and release LTO is off
+with 16 codegen units, as in [`rust-test.yml`](rust-test.md). Rust caches save
+only on the default branch.
 
 `--release` is not optional on a numerics crate. A debug build of the kernels is
 roughly an order of magnitude slower, and the recall assertions build real
