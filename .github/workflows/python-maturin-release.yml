@@ -300,7 +300,6 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           working-directory: ${{ inputs.working-directory }}
           args: --release --out dist ${{ inputs.maturin-args }}
-          sccache: true
 
       - uses: actions/upload-artifact@v7
         with:

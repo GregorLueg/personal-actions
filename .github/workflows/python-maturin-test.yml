@@ -47,6 +47,13 @@ on:
           magnitude slower, and recall assertions build real indices.
         type: string
         default: '--release'
+      cargo-test-args:
+        description: >-
+          Args appended to `cargo test`. Keep the profile in step with
+          `maturin-args`: on the same profile the dependency tree compiles once
+          and `maturin develop` relinks only the bindings crate.
+        type: string
+        default: '--release'
       test-args:
         description: Args appended to `pytest`, e.g. "-m 'not integration'".
         type: string
@@ -101,6 +108,11 @@ env:
   # cost. Set here rather than in Cargo.toml so local builds keep backtraces.
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # As in rust-test.yml: a fat or thin LTO with one codegen unit is the slowest
+  # build there is, and tests want optimised code, not the last few percent.
+  CARGO_PROFILE_RELEASE_LTO: false
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: 10
   FORCE_COLOR: '1'
@@ -155,6 +167,8 @@ jobs:
           workspaces: ${{ inputs.working-directory }}
           key: lint
           cache-on-failure: true
+          # PR caches are unreachable from other refs and evict main's under the repo cap.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -199,9 +213,13 @@ jobs:
         continue-on-error: ${{ !inputs.ty-required }}
         run: uvx ty check "${{ steps.pkg.outputs.name }}"
 
+  # One job per OS, not per OS x Python. With abi3 every interpreter links the
+  # same Rust, so a per-version job rebuilt the whole tree and kept its own
+  # cache. Here the tree builds once and each extra version recompiles only
+  # pyo3 and the bindings crate.
   test:
     needs: matrix
-    name: py${{ matrix.python }} on ${{ matrix.os }}
+    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -210,7 +228,6 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.matrix.outputs.os) }}
-        python: ${{ fromJSON(inputs.python-versions) }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -232,34 +249,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.working-directory }}
-          key: ${{ matrix.os }}-py${{ matrix.python }}
+          key: ${{ matrix.os }}
           cache-on-failure: true
+          # PR caches are unreachable from other refs and evict main's under the repo cap.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
-          python-version: ${{ matrix.python }}
-
-      - name: Set up the environment
-        run: |
-          uv venv --python '${{ matrix.python }}'
-          # shellcheck disable=SC2086  # word splitting is the point here
-          uv pip install -r pyproject.toml ${{ inputs.install-args }} \
-            "maturin>=1.15,<2" pytest ${{ inputs.extra-deps }}
 
       - name: cargo test
         if: inputs.rust-test
-        run: cargo test
+        # shellcheck disable=SC2086
+        run: cargo test ${{ inputs.cargo-test-args }}
 
+      # One venv per version, and the binaries called by path: `uv run` would
+      # pick the project's `.venv` rather than the one being tested.
       # `maturin develop` resolves and installs the project's own runtime
-      # dependencies, so numpy and friends do not need listing above.
-      - name: Build
-        # shellcheck disable=SC2086
-        run: uv run maturin develop ${{ inputs.maturin-args }}
-
-      - name: Test
-        # shellcheck disable=SC2086
-        run: uv run pytest ${{ inputs.test-args }}
+      # dependencies, so numpy and friends do not need listing.
+      - name: Build and test per Python version
+        run: |
+          bin=bin
+          if [ "$RUNNER_OS" = 'Windows' ]; then bin=Scripts; fi
+          for v in $(jq -r '.[]' <<< '${{ inputs.python-versions }}'); do
+            echo "::group::Python $v"
+            export VIRTUAL_ENV="$PWD/.venv-$v"
+            uv venv "$VIRTUAL_ENV" --python "$v"
+            # shellcheck disable=SC2086  # word splitting is the point here
+            uv pip install -r pyproject.toml ${{ inputs.install-args }} \
+              "maturin>=1.15,<2" pytest ${{ inputs.extra-deps }}
+            # shellcheck disable=SC2086
+            "$VIRTUAL_ENV/$bin/maturin" develop ${{ inputs.maturin-args }}
+            # shellcheck disable=SC2086
+            "$VIRTUAL_ENV/$bin/pytest" ${{ inputs.test-args }}
+            echo "::endgroup::"
+          done
 
   # A second lane at reduced features. For ann-search-rs that is the CPU-only
   # build: hosted runners have no adapter either way, so this proves the
@@ -287,6 +311,8 @@ jobs:
           workspaces: ${{ inputs.working-directory }}
           key: reduced
           cache-on-failure: true
+          # PR caches are unreachable from other refs and evict main's under the repo cap.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -307,7 +333,7 @@ jobs:
       - name: cargo test
         if: inputs.rust-test
         # shellcheck disable=SC2086
-        run: cargo test ${{ inputs.cpu-only-args }}
+        run: cargo test ${{ inputs.cargo-test-args }} ${{ inputs.cpu-only-args }}
 
       - name: Build
         # shellcheck disable=SC2086

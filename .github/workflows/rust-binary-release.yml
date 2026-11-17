@@ -120,6 +120,8 @@ jobs:
         with:
           key: ${{ matrix.target }}-release
           cache-on-failure: true
+          # PR caches are unreachable from other refs and evict main's under the repo cap.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Build
         shell: bash
