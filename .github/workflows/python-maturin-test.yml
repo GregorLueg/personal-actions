@@ -173,6 +173,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: cargo fmt
         if: inputs.rust-lint
@@ -257,6 +258,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: cargo test
         if: inputs.rust-test
@@ -317,6 +319,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Set up the environment
         run: |
@@ -337,8 +340,8 @@ jobs:
 
       - name: Build
         # shellcheck disable=SC2086
-        run: uv run maturin develop ${{ inputs.maturin-args }} ${{ inputs.cpu-only-args }}
+        run: uv run --no-sync maturin develop ${{ inputs.maturin-args }} ${{ inputs.cpu-only-args }}
 
       - name: Test
         # shellcheck disable=SC2086
-        run: uv run pytest ${{ inputs.test-args }}
+        run: uv run --no-sync pytest ${{ inputs.test-args }}
