@@ -82,6 +82,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
           python-version: ${{ inputs.python-version }}
 
       - name: Set up the environment
@@ -99,7 +100,7 @@ jobs:
         if: inputs.maturin
         working-directory: ${{ inputs.working-directory }}
         # shellcheck disable=SC2086
-        run: uv run maturin develop ${{ inputs.maturin-args }}
+        run: uv run --no-sync maturin develop ${{ inputs.maturin-args }}
 
       - name: Build the site
         working-directory: ${{ inputs.working-directory }}
@@ -109,7 +110,7 @@ jobs:
             args='--strict'
           fi
           # shellcheck disable=SC2086
-          uv run mkdocs build $args
+          uv run --no-sync mkdocs build $args
 
       # The guard is the point. Without it any PR into main publishes unmerged
       # docs to gh-pages.

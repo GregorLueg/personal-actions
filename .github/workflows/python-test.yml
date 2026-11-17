@@ -84,6 +84,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
           cache-dependency-glob: uv.lock
 
       - name: Install dependencies
@@ -122,6 +123,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
           cache-dependency-glob: uv.lock
           python-version: ${{ matrix.python }}
 
