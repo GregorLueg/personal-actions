@@ -50,8 +50,9 @@ on:
       cargo-test-args:
         description: >-
           Args appended to `cargo test`. Keep the profile in step with
-          `maturin-args`: on the same profile the dependency tree compiles once
-          and `maturin develop` relinks only the bindings crate.
+          `maturin-args`, but do not count on `maturin develop` reusing the
+          build: `cargo test` builds every workspace member under unified
+          features, maturin one crate, so most of the tree compiles twice.
         type: string
         default: '--release'
       test-args:
@@ -78,7 +79,9 @@ on:
         type: boolean
         default: true
       rust-test:
-        description: '`cargo test` on the bindings crate.'
+        description: >-
+          `cargo test` on the bindings workspace. Turn it off when the bindings
+          carry no Rust tests: it is a second full compile that tests nothing.
         type: boolean
         default: true
       ty:
@@ -165,7 +168,7 @@ jobs:
         if: inputs.rust-lint
         with:
           workspaces: ${{ inputs.working-directory }}
-          key: lint
+          key: py-lint
           cache-on-failure: true
           # PR caches are unreachable from other refs and evict main's under the repo cap.
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -250,7 +253,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.working-directory }}
-          key: ${{ matrix.os }}
+          # `py-`: rust-test and rust-workspace-test also key their `test` job
+          # on the OS alone, so on a shared env hash the restore prefixes overlap.
+          key: py-${{ matrix.os }}
           cache-on-failure: true
           # PR caches are unreachable from other refs and evict main's under the repo cap.
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -311,7 +316,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.working-directory }}
-          key: reduced
+          key: py-reduced
           cache-on-failure: true
           # PR caches are unreachable from other refs and evict main's under the repo cap.
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
