@@ -50,8 +50,10 @@ There is one test job per OS, not one per OS and version. Every abi3 interpreter
 links the same Rust, so the job builds the tree once, then gives each version
 its own venv, `maturin develop` and `pytest`. A later version recompiles only
 pyo3 and the bindings crate. Release LTO is off with 16 codegen units, as in
-[`rust-test.yml`](rust-test.md). Rust caches save only on the default branch,
-under `py-` keys so they never share a restore prefix with the Rust workflows.
+[`rust-test.yml`](rust-test.md). Only the test job keeps a Rust cache, saved on
+the default branch under a `py-` key so it never shares a restore prefix with
+the Rust workflows. Lint and docs build cold: they are off the critical path,
+and under the 10 GB repo cap their caches only evict the test job's.
 
 `cargo test` does not warm the tree for `maturin develop`. It builds every
 workspace member under unified features, maturin builds one crate, so most of
