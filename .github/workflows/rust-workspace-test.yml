@@ -8,6 +8,9 @@ name: Rust workspace test
 #   crate's own feature set.
 # - R is its own lane. Only the crate that links libR needs it, so the CPU
 #   lane runs without R and Windows stays on msvc there.
+# - Where the GPU lane runs (Linux, macOS) it also runs cpu-runs, so the CPU
+#   lane keeps only Windows. Same coverage, one runner fewer per OS, which
+#   matters on macOS where the account-wide concurrency cap is the bottleneck.
 # - A check job builds every member on its own at its minimal features.
 #   Feature unification makes a workspace-wide build enable features a member
 #   forgot to declare, so a member can be green in the workspace and broken
@@ -35,7 +38,8 @@ on:
       gpu-runs:
         description: >-
           `cargo test` runs on the GPU lane (Linux lavapipe and macOS), one per
-          line. Empty skips the lane.
+          line, after cpu-runs. When set, the CPU lane runs on Windows only.
+          Empty skips the lane.
         type: string
         default: ''
       check-members:
@@ -52,6 +56,12 @@ on:
         default: ''
       windows:
         description: Include windows-latest in the CPU and R matrices.
+        type: boolean
+        default: true
+      r-macos:
+        description: >-
+          Include macos-latest in the R matrix. Off when a downstream R CMD
+          check already covers linking libR on macOS.
         type: boolean
         default: true
       gpu-malloc-check:
@@ -81,14 +91,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       cpu: ${{ steps.build.outputs.cpu }}
+      r: ${{ steps.build.outputs.r }}
     steps:
       - id: build
         run: |
-          cfg='["ubuntu-latest","macos-latest"]'
-          if [ '${{ inputs.windows }}' = 'true' ]; then
-            cfg=$(jq -c '. + ["windows-latest"]' <<< "$cfg")
+          cpu='["ubuntu-latest","macos-latest"]'
+          if [ -n '${{ inputs.gpu-runs }}' ]; then
+            cpu='[]'
           fi
-          echo "cpu=$cfg" >> "$GITHUB_OUTPUT"
+          r='["ubuntu-latest"]'
+          if [ '${{ inputs.r-macos }}' = 'true' ]; then
+            r=$(jq -c '. + ["macos-latest"]' <<< "$r")
+          fi
+          if [ '${{ inputs.windows }}' = 'true' ]; then
+            cpu=$(jq -c '. + ["windows-latest"]' <<< "$cpu")
+            r=$(jq -c '. + ["windows-latest"]' <<< "$r")
+          fi
+          echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
+          echo "r=$r" >> "$GITHUB_OUTPUT"
 
   check:
     if: inputs.check-members
@@ -129,8 +149,8 @@ jobs:
           fi
 
   test:
-    if: inputs.cpu-runs != ''
     needs: matrix
+    if: inputs.cpu-runs != '' && needs.matrix.outputs.cpu != '[]'
     name: CPU on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -184,7 +204,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.matrix.outputs.cpu) }}
+        os: ${{ fromJSON(needs.matrix.outputs.r) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -280,7 +300,9 @@ jobs:
       - name: Run tests
         shell: bash
         env:
-          RUNS: ${{ inputs.gpu-runs }}
+          RUNS: |
+            ${{ inputs.cpu-runs }}
+            ${{ inputs.gpu-runs }}
         run: |
           while IFS= read -r args; do
             [ -z "${args// }" ] && continue
