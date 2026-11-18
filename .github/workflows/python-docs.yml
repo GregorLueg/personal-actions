@@ -74,15 +74,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: inputs.maturin
 
-      - uses: Swatinem/rust-cache@v2
-        if: inputs.maturin
-        with:
-          workspaces: ${{ inputs.working-directory }}
-          key: docs
-          cache-on-failure: true
-          # PR caches are unreachable from other refs and evict main's under the repo cap.
-          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-
+      # No rust cache: a docs build is off the critical path, and under the repo
+      # cap its cache only evicts the test jobs'.
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true

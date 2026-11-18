@@ -37,7 +37,7 @@ jobs:
 | `install-args` | string | `--all-extras` | Args for `uv pip install -r pyproject.toml`. |
 | `extra-deps` | string | `''` | Packages on top of the manifest, space separated. Test-only deps that do not belong in an extra. |
 | `rust-lint` | boolean | `true` | `cargo fmt --check` and `cargo clippy -D warnings`. |
-| `rust-test` | boolean | `true` | `cargo test` on the bindings crate. |
+| `rust-test` | boolean | `true` | `cargo test` on the bindings workspace. Turn it off when the bindings have no Rust tests. |
 | `ty` / `ty-required` | boolean | `true` | As in [`python-test.yml`](python-test.md). |
 | `cpu-only-args` | string | `''` | A second, feature-reduced lane. **Empty skips it.** |
 | `timeout-minutes` | number | `30` | |
@@ -49,10 +49,16 @@ testing the middle proves nothing the ends don't.
 There is one test job per OS, not one per OS and version. Every abi3 interpreter
 links the same Rust, so the job builds the tree once, then gives each version
 its own venv, `maturin develop` and `pytest`. A later version recompiles only
-pyo3 and the bindings crate. `cargo test` runs on the same profile as
-`maturin develop` so the dependency tree compiles once, and release LTO is off
-with 16 codegen units, as in [`rust-test.yml`](rust-test.md). Rust caches save
-only on the default branch.
+pyo3 and the bindings crate. Release LTO is off with 16 codegen units, as in
+[`rust-test.yml`](rust-test.md). Only the test job keeps a Rust cache, saved on
+the default branch under a `py-` key so it never shares a restore prefix with
+the Rust workflows. Lint and docs build cold: they are off the critical path,
+and under the 10 GB repo cap their caches only evict the test job's.
+
+`cargo test` does not warm the tree for `maturin develop`. It builds every
+workspace member under unified features, maturin builds one crate, so most of
+the tree compiles twice. If the bindings carry no Rust tests, set
+`rust-test: false`: on bixverse-rs that step was 20 min on macOS for zero tests.
 
 `--release` is not optional on a numerics crate. A debug build of the kernels is
 roughly an order of magnitude slower, and the recall assertions build real
