@@ -54,6 +54,13 @@ on:
         description: Workspace members to leave out of the check job, space separated.
         type: string
         default: ''
+      apt-packages:
+        description: >-
+          Extra apt packages installed on every Linux job, space separated,
+          e.g. "libhdf5-dev" for a member that links a system library. Empty
+          installs nothing.
+        type: string
+        default: ''
       windows:
         description: Include windows-latest in the CPU and R matrices.
         type: boolean
@@ -126,6 +133,14 @@ jobs:
           cache-on-failure: true
           # PR caches are unreachable from other refs and evict main's under the repo cap.
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Install extra apt packages (Linux)
+        if: runner.os == 'Linux' && inputs.apt-packages != ''
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
       - name: cargo check each member
         env:
           EXCLUDE: ${{ inputs.check-exclude }}
@@ -179,6 +194,15 @@ jobs:
           cache-on-failure: true
           # PR caches are unreachable from other refs and evict main's under the repo cap.
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Install extra apt packages (Linux)
+        if: runner.os == 'Linux' && inputs.apt-packages != ''
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
 
       - name: Run tests
         shell: bash
@@ -249,6 +273,15 @@ jobs:
         shell: pwsh
         run: echo "R_HOME=$(Rscript -e 'cat(R.home())')" >> $env:GITHUB_ENV
 
+      - name: Install extra apt packages (Linux)
+        if: runner.os == 'Linux' && inputs.apt-packages != ''
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
+
       - name: Run tests
         shell: bash
         env:
@@ -296,6 +329,15 @@ jobs:
       - name: Enable glibc heap checks (Linux)
         if: inputs.gpu-malloc-check && runner.os == 'Linux'
         run: echo "MALLOC_CHECK_=3" >> "$GITHUB_ENV"
+
+      - name: Install extra apt packages (Linux)
+        if: runner.os == 'Linux' && inputs.apt-packages != ''
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
 
       - name: Run tests
         shell: bash
