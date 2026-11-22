@@ -223,8 +223,11 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.matrix.outputs.os) }}
+    # The workflow-level `shell: bash` does not reach this job once it sets its
+    # own `defaults.run`, and Windows then falls back to pwsh.
     defaults:
       run:
+        shell: bash
         working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v7
