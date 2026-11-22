@@ -65,7 +65,8 @@ in if it uses one.
 | `publish` | boolean | `true` | Check the index first and skip the wheel matrix when the version is already there. It does not upload. |
 | `repository-url` | string | `''` | Which index the version check consults. `https://test.pypi.org/legacy/` skips the check. |
 | `linux-target` | string | `x86_64` | |
-| `manylinux` | string | `auto` | |
+| `linux-arm64` | boolean | `false` | Also build a manylinux aarch64 wheel, cross-compiled on `ubuntu-latest`. |
+| `manylinux` | string | `auto` | Applies to both Linux wheels. |
 | `maturin-args` | string | `''` | Appended to every `maturin build`. |
 | `sdist` | boolean | `false` | Also build a source distribution. |
 | `timeout-minutes` | number | `45` | |
@@ -103,7 +104,10 @@ at even if `main` has moved on.
 
 Wheels come from a `PyO3/maturin-action@v1` matrix: manylinux on
 `ubuntu-latest`, `macos-15` for arm64 and `macos-15-intel` for x86_64, plus an
-optional sdist. abi3 means one wheel per platform covers every interpreter, so
+optional sdist and, with `linux-arm64: true`, a manylinux aarch64 wheel. That
+one is cross-compiled on `ubuntu-latest` rather than built on
+`ubuntu-24.04-arm`, which is free only for public repositories. There is no
+Windows wheel; Windows users go through WSL2. abi3 means one wheel per platform covers every interpreter, so
 the matrix is platforms only.
 
 **Do not put the CubeCL `cpu` feature in a wheel.** It pulls

@@ -59,9 +59,17 @@ on:
         description: Rust target for the manylinux wheel.
         type: string
         default: x86_64
+      linux-arm64:
+        description: >-
+          Also build a manylinux aarch64 wheel, cross-compiled on an x86_64
+          runner. Off by default: a dependency with C or a build script that
+          probes the host can break under cross-compilation, and one failed
+          wheel job skips the caller's publish for every platform.
+        type: boolean
+        default: false
       manylinux:
         description: >-
-          manylinux tag for the Linux wheel. `auto` lets maturin-action pick the
+          manylinux tag for the Linux wheels. `auto` lets maturin-action pick the
           oldest container that works, which is what gets the widest install
           base.
         type: string
@@ -129,6 +137,7 @@ jobs:
       # tag cut by an earlier run is what gets built even if HEAD has moved on
       # since; the triggering commit otherwise.
       ref: ${{ steps.ref.outputs.ref }}
+      matrix: ${{ steps.matrix.outputs.include }}
       should-build: ${{ steps.pypi.outputs.published != 'true' }}
     steps:
       - uses: actions/checkout@v7
@@ -259,6 +268,26 @@ jobs:
             echo "ref=$FALLBACK" >> "$GITHUB_OUTPUT"
           fi
 
+      # A job-level `if:` cannot see `matrix`, so optional platforms are added
+      # here rather than skipped there.
+      - name: Build the wheel matrix
+        id: matrix
+        env:
+          LINUX_TARGET: ${{ inputs.linux-target }}
+          MANYLINUX: ${{ inputs.manylinux }}
+          ARM64: ${{ inputs.linux-arm64 }}
+        run: |
+          include=$(jq -nc --arg t "$LINUX_TARGET" --arg m "$MANYLINUX" '[
+            {name: "linux", runner: "ubuntu-latest", target: $t, manylinux: $m},
+            {name: "macos-arm64", runner: "macos-15", target: "aarch64", manylinux: "auto"},
+            {name: "macos-x86_64", runner: "macos-15-intel", target: "x86_64", manylinux: "auto"}
+          ]')
+          if [ "$ARM64" = 'true' ]; then
+            include=$(jq -c --arg m "$MANYLINUX" \
+              '. + [{name: "linux-arm64", runner: "ubuntu-latest", target: "aarch64", manylinux: $m}]' <<< "$include")
+          fi
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
   # One wheel per platform. abi3 means a single wheel covers every supported
   # interpreter, so the matrix is platforms only. Whatever the release tag
   # points at is what gets built: the tag may have been cut by an earlier run
@@ -274,19 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            target: ${{ inputs.linux-target }}
-            manylinux: ${{ inputs.manylinux }}
-          - name: macos-arm64
-            runner: macos-15
-            target: aarch64
-            manylinux: auto
-          - name: macos-x86_64
-            runner: macos-15-intel
-            target: x86_64
-            manylinux: auto
+        include: ${{ fromJSON(needs.version.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
         with:
