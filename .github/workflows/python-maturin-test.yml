@@ -271,10 +271,14 @@ jobs:
       - name: Build and test per Python version
         run: |
           bin=bin
-          if [ "$RUNNER_OS" = 'Windows' ]; then bin=Scripts; fi
-          for v in $(jq -r '.[]' <<< '${{ inputs.python-versions }}'); do
+          root=$PWD
+          # uv is a native binary and rejects Git bash's `/d/a/...` paths;
+          # `cygpath -m` gives `D:/a/...`, which both sides accept.
+          if [ "$RUNNER_OS" = 'Windows' ]; then bin=Scripts; root=$(cygpath -m "$PWD"); fi
+          # jq.exe writes CRLF, and a trailing `\r` is an invalid path character.
+          for v in $(jq -r '.[]' <<< '${{ inputs.python-versions }}' | tr -d '\r'); do
             echo "::group::Python $v"
-            export VIRTUAL_ENV="$PWD/.venv-$v"
+            export VIRTUAL_ENV="$root/.venv-$v"
             uv venv "$VIRTUAL_ENV" --python "$v"
             # shellcheck disable=SC2086  # word splitting is the point here
             uv pip install -r pyproject.toml ${{ inputs.install-args }} \
