@@ -17,6 +17,12 @@ on:
           Args appended to every `cargo publish -p <member>`, e.g. "--no-verify".
         type: string
         default: ''
+      member-features:
+        description: >-
+          Per-member features for the publish verification build, one
+          `member=feat1,feat2` per line. Only the verify build sees them.
+        type: string
+        default: ''
       needs-r:
         description: >-
           A member links against R via extendr, so the publish verification
@@ -183,6 +189,7 @@ jobs:
           ORDER: ${{ steps.ws.outputs.order }}
           MISSING: ${{ steps.crate.outputs.missing }}
           MAX_WAIT_MINUTES: ${{ inputs.rate-limit-max-wait-minutes }}
+          MEMBER_FEATURES: ${{ inputs.member-features }}
         shell: bash
         run: |
           set -o pipefail
@@ -190,12 +197,14 @@ jobs:
           while IFS= read -r name; do
             [ -z "$name" ] && continue
             [[ " $MISSING " == *" $name "* ]] || continue
-            echo "::group::cargo publish -p $name"
+            features=$(awk -F= -v n="$name" '$1 == n {print $2}' <<< "$MEMBER_FEATURES")
+            features_arg=${features:+--features $features}
+            echo "::group::cargo publish -p $name $features_arg"
             # crates.io rate-limits new crate names and says when to retry, so
             # sleep until then instead of failing the run. Any other error fails.
             while true; do
               # shellcheck disable=SC2086  # word splitting is the point here
-              if cargo publish -p "$name" ${{ inputs.publish-args }} 2>&1 | tee publish.log; then
+              if cargo publish -p "$name" $features_arg ${{ inputs.publish-args }} 2>&1 | tee publish.log; then
                 break
               fi
               after=$(grep -oP 'status 429.*try again after \K[^.]*GMT' publish.log || true)
@@ -213,8 +222,8 @@ jobs:
             rm -f publish.log
             echo "::endgroup::"
             published="$published $name"
+            echo "published=${published# }" >> "$GITHUB_OUTPUT"
           done <<< "$ORDER"
-          echo "published=${published# }" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         if: always() && steps.ws.outputs.version != ''
