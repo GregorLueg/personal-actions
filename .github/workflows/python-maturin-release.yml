@@ -80,6 +80,12 @@ on:
           for a smaller wheel. Applied to the sdist too.
         type: string
         default: ''
+      before-script-linux:
+        description: >-
+          Shell run inside the manylinux container before every Linux build,
+          e.g. to upgrade cmake: the aarch64 cross image ships 3.22.
+        type: string
+        default: ''
       sdist:
         description: >-
           Also build and publish a source distribution. A crate whose bindings
@@ -316,6 +322,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           working-directory: ${{ inputs.working-directory }}
+          before-script-linux: ${{ inputs.before-script-linux }}
           args: --release --out dist ${{ inputs.maturin-args }}
 
       - uses: actions/upload-artifact@v7
